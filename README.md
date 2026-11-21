@@ -1,5 +1,5 @@
 # Uptime Kuma ke WhatsApp melalui NgirimWA
-
+Vendor Wa Gateway : [NgirimWA](https://ngirimwa.com/)
 Aplikasi PHP ini menerima perubahan status monitor dari Uptime Kuma dan mengirim notifikasi ke grup WhatsApp melalui API NgirimWA. Pemrosesan webhook, antrean pesan, cron worker, dan log berada di komponen terpisah.
 
 ## Fungsi utama
