@@ -73,7 +73,8 @@ $response = [
     ],
     'messages' => [
         'success' => max(0, (int) ($metrics['success'] ?? 0)),
-        'failure' => max(0, (int) ($metrics['failure'] ?? 0))
+        'failure' => max(0, (int) ($metrics['failure'] ?? 0)),
+        'skipped_same_status' => max(0, (int) ($metrics['skipped_same_status'] ?? 0))
     ],
     'configuration' => [
         'ngirimwa_api_url' => app_env('NGIRIMWA_BASE_URL') !== '',

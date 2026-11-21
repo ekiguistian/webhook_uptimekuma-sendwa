@@ -170,12 +170,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         <article class="monitor-card">
           <h3>Pesan berhasil</h3>
           <strong class="metric-value" id="messages-success">0</strong>
-          <span class="metric-state">Total pengiriman diterima API</span>
+          <span class="metric-state">Diterima API NgirimWA</span>
         </article>
         <article class="monitor-card">
           <h3>Pesan gagal</h3>
           <strong class="metric-value" id="messages-failure">0</strong>
-          <span class="metric-state">Total pengiriman gagal</span>
+          <span class="metric-state">Gagal dikirim atau kedaluwarsa</span>
+        </article>
+        <article class="monitor-card">
+          <h3>Dilewati · status sama</h3>
+          <strong class="metric-value" id="messages-skipped-same-status">0</strong>
+          <span class="metric-state">Tidak dihitung sebagai pesan gagal</span>
         </article>
       </div>
 
@@ -336,6 +341,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         const counts = new Intl.NumberFormat('id-ID');
         document.getElementById('messages-success').textContent = counts.format(data.messages?.success ?? 0);
         document.getElementById('messages-failure').textContent = counts.format(data.messages?.failure ?? 0);
+        document.getElementById('messages-skipped-same-status').textContent = counts.format(data.messages?.skipped_same_status ?? 0);
 
         document.querySelectorAll('[data-config]').forEach(function (element) {
           const configured = Boolean(data.configuration && data.configuration[element.dataset.config]);

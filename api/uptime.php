@@ -174,6 +174,7 @@ if ($lastStatusValue === $status) {
 
     $elapsed = max(0, time() - $lastAcceptedAt);
     if (!$isTestNotification && $elapsed < 600) {
+        app_delivery_metrics('skip-same-status', ['monitor' => $monitorName]);
         app_log_rate_limited('system', 'Duplicate monitor status suppressed during the 10-minute cooldown', 'same-status-' . $monitorName, 60, [
             'monitor' => $monitorName,
             'status' => $status,

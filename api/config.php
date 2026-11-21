@@ -86,6 +86,29 @@ function app_count_delivery_log_entries($path)
     return $count;
 }
 
+function app_count_same_status_skips($path)
+{
+    if (!is_readable($path)) {
+        return 0;
+    }
+
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return 0;
+    }
+
+    $count = 0;
+    while (($line = fgets($handle)) !== false) {
+        if (strpos($line, 'SKIP SAME:') !== false
+            || strpos($line, 'Duplicate monitor status suppressed during the 10-minute cooldown') !== false) {
+            $count++;
+        }
+    }
+    fclose($handle);
+
+    return $count;
+}
+
 function app_delivery_metrics($incrementChannel = null, $context = [])
 {
     $logDirectory = app_log_directory();
@@ -100,20 +123,37 @@ function app_delivery_metrics($incrementChannel = null, $context = [])
             fclose($lock);
         }
         $metrics = app_read_json_array($metricsPath);
-        return is_array($metrics) ? $metrics : ['success' => 0, 'failure' => 0];
+        return is_array($metrics)
+            ? ($metrics + ['success' => 0, 'failure' => 0, 'skipped_same_status' => 0])
+            : ['success' => 0, 'failure' => 0, 'skipped_same_status' => 0];
     }
 
     $metrics = app_read_json_array($metricsPath);
     $initialized = is_array($metrics);
+    $metricsChanged = false;
     if (!$initialized) {
         $metrics = [
             'success' => app_count_delivery_log_entries($logDirectory . '/send-success.log'),
-            'failure' => app_count_delivery_log_entries($logDirectory . '/send-failure.log')
+            'failure' => app_count_delivery_log_entries($logDirectory . '/send-failure.log'),
+            'skipped_same_status' => app_count_same_status_skips($logDirectory . '/system.log')
         ];
+        $metricsChanged = true;
+    } else {
+        foreach (['success', 'failure', 'skipped_same_status'] as $metricName) {
+            if (!isset($metrics[$metricName]) || !is_numeric($metrics[$metricName])) {
+                $metrics[$metricName] = $metricName === 'skipped_same_status'
+                    ? app_count_same_status_skips($logDirectory . '/system.log')
+                    : 0;
+                $metricsChanged = true;
+            }
+        }
     }
 
     $incremented = false;
-    if (isset($context['service']) && $context['service'] !== '') {
+    if ($incrementChannel === 'skip-same-status') {
+        $metrics['skipped_same_status'] = (int) ($metrics['skipped_same_status'] ?? 0) + 1;
+        $incremented = true;
+    } elseif (isset($context['service']) && $context['service'] !== '') {
         if ($incrementChannel === 'send-success') {
             $metrics['success'] = (int) ($metrics['success'] ?? 0) + 1;
             $incremented = true;
@@ -126,7 +166,7 @@ function app_delivery_metrics($incrementChannel = null, $context = [])
     if ($incremented) {
         $metrics['updated_at'] = date('c');
     }
-    if (!$initialized || $incremented) {
+    if ($metricsChanged || $incremented) {
         if (!app_write_json_array($metricsPath, $metrics)) {
             error_log('Could not write delivery metrics');
         }
