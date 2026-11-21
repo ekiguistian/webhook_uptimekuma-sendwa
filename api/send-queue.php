@@ -12,7 +12,11 @@ if (PHP_SAPI !== 'cli') {
 
 $API_KEY = app_env('NGIRIMWA_API_KEY');
 $GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
-$API_BASE_URL = rtrim(app_env('NGIRIMWA_BASE_URL', 'https://dash.ngirimwa.com/api/v1'), '/');
+$API_BASE_URL = trim(app_env('NGIRIMWA_BASE_URL'));
+if ($API_BASE_URL === '') {
+    $API_BASE_URL = 'https://dash.ngirimwa.com/api/v1';
+}
+$API_BASE_URL = rtrim($API_BASE_URL, '/');
 $DEVICE_STATUS_URL = $API_BASE_URL . '/devices/status';
 $SEND_URL = $API_BASE_URL . '/messages/send';
 

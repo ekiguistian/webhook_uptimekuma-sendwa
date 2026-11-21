@@ -109,17 +109,16 @@ NGIRIMWA_GROUP_ID=
 NGIRIMWA_BASE_URL=https://dash.ngirimwa.com/api/v1
 UPTIME_MESSAGE_SIGNATURE=Server Monitoring
 UPTIME_STATUS_WEBSITE=https://status.example.com
-UPTIME_KUMA_URL=
 UPTIME_WEBHOOK_TOKEN=
 ~~~
 
-`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. `UPTIME_KUMA_URL` adalah URL instance Uptime Kuma yang akan diperiksa live monitor. Jika variabel ini kosong, monitor menggunakan `UPTIME_STATUS_WEBSITE` sebagai target. Signature dan `UPTIME_STATUS_WEBSITE` juga digunakan sebagai footer notifikasi. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
+`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Live monitor memakai `UPTIME_STATUS_WEBSITE` sebagai target koneksi sekaligus footer notifikasi; tidak diperlukan variabel URL tambahan. Jika `NGIRIMWA_BASE_URL` kosong, aplikasi menggunakan endpoint default NgirimWA. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
 
 ## Cron worker dan live monitor
 
 `api/send-queue.php` memeriksa perangkat dan memproses antrean. `api/live-monitor.php --loop` memeriksa DNS 1.1.1.1, endpoint NgirimWA, dan URL Uptime Kuma setiap lima detik, lalu menyimpan snapshot untuk halaman utama. Pemeriksaan DNS 1.1.1.1 berupa kueri DNS melalui UDP, bukan ICMP echo. Cron standar hanya memulai task per menit; opsi `--loop` menjalankan 12 pemeriksaan dengan jarak lima detik dalam satu proses. Lock worker mencegah proses monitor berjalan tumpang tindih. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
 
-Untuk memeriksa worker satu kali dari terminal, jalankan `php /path/project/api/live-monitor.php --once`. Snapshot terbaru ditulis ke `api/live-monitor.json`; baris worker mulai dan selesai dapat dilihat di `log/cron-run.log`. Folder `api/` harus bisa ditulis oleh pengguna cron dan snapshot harus bisa dibaca oleh PHP-FPM.
+Untuk memeriksa worker satu kali dari terminal, jalankan `php /path/project/api/live-monitor.php --once`. Snapshot terbaru ditulis ke `api/live-monitor.json`; selama pembaruan, endpoint juga dapat membaca snapshot lama dari `log/live-monitor.json`. Baris worker mulai dan selesai dapat dilihat di `log/cron-run.log`. Folder `api/` harus bisa ditulis oleh pengguna cron dan snapshot harus bisa dibaca oleh PHP-FPM.
 
 ### Linux cron
 

@@ -186,11 +186,12 @@ function live_monitor_write_snapshot($snapshot)
 
 function live_monitor_collect_snapshot()
 {
-    $apiBaseUrl = rtrim(app_env('NGIRIMWA_BASE_URL', 'https://dash.ngirimwa.com/api/v1'), '/');
-    $uptimeKumaUrl = trim(app_env('UPTIME_KUMA_URL'));
-    if ($uptimeKumaUrl === '') {
-        $uptimeKumaUrl = trim(app_env('UPTIME_STATUS_WEBSITE'));
+    $apiBaseUrl = trim(app_env('NGIRIMWA_BASE_URL'));
+    if ($apiBaseUrl === '') {
+        $apiBaseUrl = 'https://dash.ngirimwa.com/api/v1';
     }
+    $apiBaseUrl = rtrim($apiBaseUrl, '/');
+    $uptimeKumaUrl = trim(app_env('UPTIME_STATUS_WEBSITE'));
     $dnsResult = live_monitor_dns_probe();
 
     $httpResults = live_monitor_http_probes([

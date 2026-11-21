@@ -15,12 +15,22 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     exit;
 }
 
-$snapshot = app_read_json_array(__DIR__ . '/live-monitor.json');
-if (!is_array($snapshot)) {
-    $snapshot = [];
+$snapshot = [];
+$snapshotTimestamp = 0;
+foreach ([__DIR__ . '/live-monitor.json', app_log_directory() . '/live-monitor.json'] as $snapshotPath) {
+    $candidate = app_read_json_array($snapshotPath);
+    if (!is_array($candidate) || !is_string($candidate['checked_at'] ?? null)) {
+        continue;
+    }
+
+    $candidateTimestamp = strtotime($candidate['checked_at']) ?: 0;
+    if ($candidateTimestamp >= $snapshotTimestamp) {
+        $snapshot = $candidate;
+        $snapshotTimestamp = $candidateTimestamp;
+    }
 }
 $metrics = app_delivery_metrics();
-$uptimeKumaUrlConfigured = app_env('UPTIME_KUMA_URL') !== '' || app_env('UPTIME_STATUS_WEBSITE') !== '';
+$uptimeKumaUrlConfigured = app_env('UPTIME_STATUS_WEBSITE') !== '';
 
 $sanitizeCheck = static function ($check, $defaultConfigured = true) {
     if (!is_array($check)) {
@@ -57,5 +67,14 @@ $response = [
         'uptime_kuma_url' => $uptimeKumaUrlConfigured
     ]
 ];
+
+$uptimeKumaCheck = $sanitizeCheck($snapshot['uptime_kuma'] ?? null, $uptimeKumaUrlConfigured);
+if (!$uptimeKumaUrlConfigured) {
+    $uptimeKumaCheck = ['configured' => false, 'ok' => null, 'ms' => null];
+} elseif (!$uptimeKumaCheck['configured']) {
+    // An old snapshot may predate the configured URL; wait for the next worker sample.
+    $uptimeKumaCheck = ['configured' => true, 'ok' => null, 'ms' => null];
+}
+$response['checks']['uptime_kuma'] = $uptimeKumaCheck;
 
 echo json_encode($response, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
