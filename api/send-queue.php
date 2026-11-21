@@ -23,6 +23,9 @@ $AUTH_BLOCK_FILE = __DIR__ . '/ngirimwa-auth.lock';
 function log_send($channel, $message, $context = [])
 {
     app_log($channel, $message, $context);
+    if ($channel !== 'cron-run') {
+        app_log('cron-run', $message, $context);
+    }
 }
 
 function drop_queue($reason, $context = [])
@@ -140,12 +143,16 @@ function complete_queue_item($service, $status)
 
 // Avoid overlapping cron executions.
 $lock = fopen(__DIR__ . '/cron.lock', 'c');
-if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
-    if (is_resource($lock)) {
-        fclose($lock);
-    }
+if ($lock === false) {
+    log_send('system', 'Could not open the cron lock file');
+    exit(1);
+}
+if (!flock($lock, LOCK_EX | LOCK_NB)) {
+    fclose($lock);
+    log_send('cron-run', 'Worker skipped: another execution is still active');
     exit;
 }
+log_send('cron-run', 'Worker started');
 
 $queueLock = app_queue_lock();
 if ($queueLock === false) {
@@ -180,6 +187,7 @@ if ($removedOldFailures && !app_write_json_array($QUEUE_FILE, $queue)) {
 }
 app_queue_unlock($queueLock);
 if (empty($queue)) {
+    log_send('cron-run', 'Worker completed: no queued messages');
     exit;
 }
 
@@ -357,3 +365,7 @@ log_send('send-success', 'NgirimWA accepted the message', [
 ]);
 
 complete_queue_item($service, $item['status'] ?? null);
+log_send('cron-run', 'Worker completed: queued message processed', [
+    'service' => (string) $service,
+    'status' => $item['status'] ?? null
+]);

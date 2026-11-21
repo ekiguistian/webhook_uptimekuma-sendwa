@@ -74,7 +74,7 @@ function configure_app_error_logging()
 
 function app_log($channel, $message, $context = [])
 {
-    $allowedChannels = ['system', 'send-success', 'send-failure'];
+    $allowedChannels = ['system', 'send-success', 'send-failure', 'cron-run'];
     if (!in_array($channel, $allowedChannels, true)) {
         $channel = 'system';
     }
@@ -93,7 +93,9 @@ function app_log($channel, $message, $context = [])
         $line .= ' ' . $contextJson;
     }
     $line .= PHP_EOL;
-    $channels = $channel === 'system' ? ['system'] : [$channel, 'system'];
+    $channels = in_array($channel, ['system', 'cron-run'], true)
+        ? [$channel]
+        : [$channel, 'system'];
     foreach ($channels as $logChannel) {
         if (file_put_contents($logDirectory . '/' . $logChannel . '.log', $line, FILE_APPEND | LOCK_EX) === false) {
             error_log('Application log write failed for channel ' . $logChannel);

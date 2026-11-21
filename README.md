@@ -143,7 +143,7 @@ Versi yang dipilih untuk website terlihat pada pengaturan PHP website di aaPanel
 - `log/send-success.log` mencatat pesan yang diterima NgirimWA, termasuk tracking ID.
 - `log/send-failure.log` mencatat pemeriksaan API/perangkat dan pesan yang gagal.
 - `log/php-error.log` menampung warning serta fatal error PHP; detail error tidak ditampilkan di browser.
-- `log/cron-run.log` menampung output cron Linux/aaPanel.
+- `log/cron-run.log` mencatat pemanggilan worker, antrean kosong, dan hasil proses pesan. Redirect stdout/stderr pada command cron menjadi tambahan untuk output CLI yang tidak tertangani aplikasi.
 - Penolakan token dicatat tanpa menyimpan nilai token atau isi payload.
 - Folder `log/` tidak dilacak Git dan diblokir dari akses HTTP pada Apache. Rotasi log mengikuti kebijakan server.
 
