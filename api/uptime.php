@@ -1,29 +1,34 @@
 <?php
 
-$DEVICE_TOKEN = trim((string) getenv('WEAGATE_DEVICE_TOKEN'));
-$CHAT_ID      = trim((string) getenv('WEAGATE_CHAT_ID'));
+require_once __DIR__ . '/config.php';
+
+$NGIRIMWA_API_KEY  = app_env('NGIRIMWA_API_KEY');
+$NGIRIMWA_GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
+
+header('Content-Type: application/json; charset=utf-8');
 
 $QUEUE_FILE  = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';
 $LOG_FILE    = __DIR__ . '/app.log';
-$DEBUG_FILE  = __DIR__ . '/debug.log';
 
-// raw
 $raw = file_get_contents("php://input");
-file_put_contents($DEBUG_FILE, date('c')." | ".$raw.PHP_EOL, FILE_APPEND);
-
 $data = json_decode($raw, true);
 
-// log
 function log_msg($msg) {
     global $LOG_FILE;
-    file_put_contents($LOG_FILE, date('c')." | ".$msg.PHP_EOL, FILE_APPEND);
+    file_put_contents($LOG_FILE, date('c')." | ".$msg.PHP_EOL, FILE_APPEND | LOCK_EX);
 }
 
-if ($DEVICE_TOKEN === '' || $CHAT_ID === '') {
-    log_msg("CONFIG ERROR: missing WEAGATE_DEVICE_TOKEN or WEAGATE_CHAT_ID");
+if ($NGIRIMWA_API_KEY === '' || $NGIRIMWA_GROUP_ID === '') {
+    log_msg("CONFIG ERROR: missing NGIRIMWA_API_KEY or NGIRIMWA_GROUP_ID");
     http_response_code(500);
     echo json_encode(["ok"=>false, "error"=>"Configuration missing"]);
+    exit;
+}
+
+if (!is_array($data)) {
+    http_response_code(400);
+    echo json_encode(["ok"=>false, "error"=>"Invalid JSON payload"]);
     exit;
 }
 
@@ -97,16 +102,17 @@ $text .= "Website : https://status-server.nexan.id";
 $queue[$monitorName] = [
     "status"    => $status,
     "queued_at" => time(),
-    "payload"   => [
-        "token"   => $DEVICE_TOKEN,
-        "to"      => $CHAT_ID,
-        "type"    => "text",
-        "message" => substr($text, 0, 3500),
-        "instan"  => 1
-    ]
+    "idempotency_key" => bin2hex(random_bytes(16)),
+    "message"   => substr($text, 0, 3500)
 ];
 
-file_put_contents($QUEUE_FILE, json_encode($queue, JSON_PRETTY_PRINT));
+$queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+if ($queueJson === false || file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX) === false) {
+    log_msg("QUEUE ERROR: could not save message for $monitorName");
+    http_response_code(500);
+    echo json_encode(["ok"=>false, "error"=>"Could not queue message"]);
+    exit;
+}
 
 log_msg("QUEUED: $monitorName ($status)");
 

@@ -1,3 +1,6 @@
+/\.env
+/\.env.*
+!/.env.example
 /api/*.log
 /api/*.lock
 /api/last-status.json
