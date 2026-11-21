@@ -3,6 +3,8 @@
 !/.env.example
 /api/*.log*
 /api/*.lock
+/api/live-monitor.json
+/api/live-monitor.json.tmp
 /api/last-status.json
 /api/queue.json
 /log/*.log*

@@ -167,19 +167,16 @@ function live_monitor_http_probes($targets)
 
 function live_monitor_write_snapshot($snapshot)
 {
-    $logDirectory = app_log_directory();
-    if (!is_dir($logDirectory) && !@mkdir($logDirectory, 0750, true) && !is_dir($logDirectory)) {
-        return false;
-    }
-
-    $path = $logDirectory . '/live-monitor.json';
-    $temporaryPath = $path . '.tmp.json';
+    // Keep the snapshot outside log/ because cron may run as root while PHP-FPM
+    // runs as the site user. The public status handler can read this file safely.
+    $path = __DIR__ . '/live-monitor.json';
+    $temporaryPath = $path . '.tmp';
     $json = json_encode($snapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($json === false || file_put_contents($temporaryPath, $json, LOCK_EX) === false) {
         return false;
     }
 
-    @chmod($temporaryPath, 0640);
+    @chmod($temporaryPath, 0644);
     if (!@rename($temporaryPath, $path)) {
         @unlink($temporaryPath);
         return false;
@@ -191,6 +188,9 @@ function live_monitor_collect_snapshot()
 {
     $apiBaseUrl = rtrim(app_env('NGIRIMWA_BASE_URL', 'https://dash.ngirimwa.com/api/v1'), '/');
     $uptimeKumaUrl = trim(app_env('UPTIME_KUMA_URL'));
+    if ($uptimeKumaUrl === '') {
+        $uptimeKumaUrl = trim(app_env('UPTIME_STATUS_WEBSITE'));
+    }
     $dnsResult = live_monitor_dns_probe();
 
     $httpResults = live_monitor_http_probes([
@@ -213,12 +213,19 @@ if ($lock === false) {
 }
 if (!flock($lock, LOCK_EX | LOCK_NB)) {
     fclose($lock);
+    app_log('cron-run', 'Live monitor worker skipped because another run is active');
     exit(0);
 }
 
 $loopMode = in_array('--loop', $argv ?? [], true);
 $iterations = $loopMode ? 12 : 1;
 $startedAt = microtime(true);
+$completedSamples = 0;
+app_log('cron-run', 'Live monitor worker started', [
+    'mode' => $loopMode ? 'loop' : 'once',
+    'samples_planned' => $iterations
+]);
+
 for ($iteration = 0; $iteration < $iterations; $iteration++) {
     if ($iteration > 0) {
         $targetTime = $startedAt + ($iteration * 5);
@@ -228,10 +235,22 @@ for ($iteration = 0; $iteration < $iterations; $iteration++) {
         }
     }
 
-    if (!live_monitor_write_snapshot(live_monitor_collect_snapshot())) {
-        app_log_rate_limited('system', 'Could not write live monitor snapshot', 'live-monitor-snapshot-write', 60);
+    try {
+        if (live_monitor_write_snapshot(live_monitor_collect_snapshot())) {
+            $completedSamples++;
+        } else {
+            app_log_rate_limited('system', 'Could not write live monitor snapshot', 'live-monitor-snapshot-write', 60);
+        }
+    } catch (Throwable $exception) {
+        app_log_rate_limited('system', 'Live monitor sample failed', 'live-monitor-sample-failed', 60, [
+            'error' => $exception->getMessage()
+        ]);
     }
 }
 
+app_log('cron-run', 'Live monitor worker completed', [
+    'samples_completed' => $completedSamples,
+    'duration_ms' => round((microtime(true) - $startedAt) * 1000, 2)
+]);
 flock($lock, LOCK_UN);
 fclose($lock);

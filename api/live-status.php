@@ -15,11 +15,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     exit;
 }
 
-$snapshot = app_read_json_array(app_log_directory() . '/live-monitor.json');
+$snapshot = app_read_json_array(__DIR__ . '/live-monitor.json');
 if (!is_array($snapshot)) {
     $snapshot = [];
 }
 $metrics = app_delivery_metrics();
+$uptimeKumaUrlConfigured = app_env('UPTIME_KUMA_URL') !== '' || app_env('UPTIME_STATUS_WEBSITE') !== '';
 
 $sanitizeCheck = static function ($check, $defaultConfigured = true) {
     if (!is_array($check)) {
@@ -43,7 +44,7 @@ $response = [
     'checks' => [
         'dns' => $sanitizeCheck($snapshot['dns'] ?? null),
         'ngirimwa' => $sanitizeCheck($snapshot['ngirimwa'] ?? null),
-        'uptime_kuma' => $sanitizeCheck($snapshot['uptime_kuma'] ?? null, app_env('UPTIME_KUMA_URL') !== '')
+        'uptime_kuma' => $sanitizeCheck($snapshot['uptime_kuma'] ?? null, $uptimeKumaUrlConfigured)
     ],
     'messages' => [
         'success' => max(0, (int) ($metrics['success'] ?? 0)),
@@ -53,7 +54,7 @@ $response = [
         'api_key' => app_env('NGIRIMWA_API_KEY') !== '',
         'webhook_token' => app_env('UPTIME_WEBHOOK_TOKEN') !== '',
         'group_id' => app_env('NGIRIMWA_GROUP_ID') !== '',
-        'uptime_kuma_url' => app_env('UPTIME_KUMA_URL') !== ''
+        'uptime_kuma_url' => $uptimeKumaUrlConfigured
     ]
 ];
 
