@@ -35,13 +35,32 @@ https://domain-anda/webhook
 
 Halaman utama menampilkan URL sesuai domain yang dibuka dan menyediakan tombol **Salin URL**. Web server perlu rewrite agar `/webhook` diarahkan ke handler aplikasi. Aturan rewrite untuk Apache dan Nginx ada pada panduan pemasangan masing-masing di bawah.
 
-Di Uptime Kuma, tambahkan header berikut pada konfigurasi webhook:
+Token harus sama dengan `UPTIME_WEBHOOK_TOKEN` pada `.env`.
+
+## Memasang notifikasi di Uptime Kuma
+
+1. Pastikan `.env` aplikasi berisi `UPTIME_WEBHOOK_TOKEN` dan URL webhook dapat dibuka melalui HTTPS. Salin URL `/webhook` dari halaman utama aplikasi.
+2. Di Uptime Kuma, buka **Settings → Notifications → Setup Notification** lalu pilih **Webhook**.
+3. Isi **Post URL** dengan URL yang disalin, misalnya:
 
 ~~~text
-X-Webhook-Token: token-yang-ada-di-file-env
+https://domain-anda/webhook
 ~~~
 
-Token harus sama dengan `UPTIME_WEBHOOK_TOKEN` pada `.env`.
+4. Atur **HTTP Method** ke **POST**.
+5. Pilih **Request Body: JSON (`application/json`)**. Biarkan format JSON bawaan Uptime Kuma; jangan pilih `form-data` atau `custom` karena handler menerima payload JSON standar.
+6. Aktifkan **Additional Headers**, lalu masukkan JSON berikut. Ganti nilainya dengan token yang sama persis dengan `UPTIME_WEBHOOK_TOKEN` di `.env`:
+
+   ~~~json
+   {
+     "X-Webhook-Token": "token-yang-ada-di-file-env"
+   }
+   ~~~
+
+7. Simpan notifikasi, lalu gunakan tombol **Test**. Aplikasi menerima tes sebagai pesan uji dengan nama dan status acak. Respons berhasil dari Uptime Kuma berarti webhook diterima oleh aplikasi; pengiriman WhatsApp dilakukan worker cron setelah itu.
+8. Buka pengaturan setiap monitor yang ingin diberi notifikasi, pilih notifikasi Webhook yang baru dibuat, lalu simpan perubahan monitor.
+
+Jika tes ditolak, pastikan token header sama dengan `.env`, metode tetap **POST**, body menggunakan JSON, dan URL rewrite `/webhook` aktif. Jika webhook diterima tetapi pesan belum sampai, periksa status cron dan file `log/cron-run.log` serta `log/send-failure.log`.
 
 ## Konfigurasi
 
