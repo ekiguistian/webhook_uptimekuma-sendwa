@@ -1,8 +1,10 @@
-/\.env
-/\.env.*
+.env
+.env.*
 !/.env.example
-/api/*.log
+/api/*.log*
 /api/*.lock
 /api/last-status.json
 /api/queue.json
-/log/*.log
+/log/*.log*
+/log/*.lock
+/log/*.json

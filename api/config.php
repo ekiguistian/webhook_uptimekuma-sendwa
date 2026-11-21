@@ -87,6 +87,7 @@ function app_log($channel, $message, $context = [])
     $contextJson = $context
         ? json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
         : '';
+    $message = preg_replace('/[\r\n\x00]+/', ' ', (string) $message);
     $line = '[' . date('c') . '] ' . $message;
     if ($contextJson !== false && $contextJson !== '') {
         $line .= ' ' . $contextJson;
@@ -98,6 +99,58 @@ function app_log($channel, $message, $context = [])
             error_log('Application log write failed for channel ' . $logChannel);
         }
     }
+}
+
+function app_log_rate_limited($channel, $message, $key, $intervalSeconds = 60, $context = [])
+{
+    $logDirectory = app_log_directory();
+    if (!is_dir($logDirectory)) {
+        @mkdir($logDirectory, 0750, true);
+    }
+
+    $lock = @fopen($logDirectory . '/event-throttle.lock', 'c');
+    if ($lock === false || !flock($lock, LOCK_EX)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        return false;
+    }
+
+    $stateFile = $logDirectory . '/event-throttle.json';
+    $state = app_read_json_array($stateFile);
+    if (!is_array($state)) {
+        $state = [];
+    }
+
+    $now = time();
+    $stateKey = hash('sha256', (string) $key);
+    foreach ($state as $storedKey => $lastLoggedAt) {
+        if (!is_numeric($lastLoggedAt) || $now - (int) $lastLoggedAt > 3600) {
+            unset($state[$storedKey]);
+        }
+    }
+
+    $lastLoggedAt = (int) ($state[$stateKey] ?? 0);
+    if ($now - $lastLoggedAt < max(1, (int) $intervalSeconds)) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        return false;
+    }
+
+    $state[$stateKey] = $now;
+    if (count($state) > 512) {
+        asort($state, SORT_NUMERIC);
+        $state = array_slice($state, -512, null, true);
+    }
+    $stateJson = json_encode($state, JSON_PRETTY_PRINT);
+    if ($stateJson !== false) {
+        file_put_contents($stateFile, $stateJson, LOCK_EX);
+    }
+
+    app_log($channel, $message, $context);
+    flock($lock, LOCK_UN);
+    fclose($lock);
+    return true;
 }
 
 function app_queue_lock()

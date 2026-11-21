@@ -26,8 +26,29 @@ if ($webhookToken === '') {
 
 $providedToken = $_SERVER['HTTP_X_WEBHOOK_TOKEN'] ?? '';
 if (!is_string($providedToken) || !hash_equals($webhookToken, $providedToken)) {
-    app_log('system', 'Webhook rejected: authentication token is missing or invalid');
+    app_log_rate_limited(
+        'system',
+        'Webhook rejected: authentication token is missing or invalid',
+        $_SERVER['REMOTE_ADDR'] ?? 'unknown'
+    );
     http_response_code(401);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+    exit;
+}
+
+$contentType = strtolower(trim(explode(';', $_SERVER['CONTENT_TYPE'] ?? '')[0]));
+if ($contentType !== 'application/json') {
+    app_log('system', 'Webhook rejected: unsupported content type');
+    http_response_code(415);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+    exit;
+}
+
+$maxPayloadBytes = 32768;
+$contentLength = $_SERVER['CONTENT_LENGTH'] ?? '';
+if ($contentLength !== '' && (!ctype_digit((string) $contentLength) || (int) $contentLength > $maxPayloadBytes)) {
+    app_log('system', 'Webhook rejected: request body exceeds size limit');
+    http_response_code(413);
     echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
     exit;
 }
@@ -35,7 +56,14 @@ if (!is_string($providedToken) || !hash_equals($webhookToken, $providedToken)) {
 $QUEUE_FILE  = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';
 
-$raw = file_get_contents("php://input");
+$raw = file_get_contents('php://input', false, null, 0, $maxPayloadBytes + 1);
+if ($raw === false || strlen($raw) > $maxPayloadBytes) {
+    app_log('system', 'Webhook rejected: request body could not be read or exceeds size limit');
+    http_response_code(413);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+    exit;
+}
+
 $data = json_decode($raw, true);
 
 function log_msg($msg) {
@@ -49,15 +77,16 @@ if ($NGIRIMWA_API_KEY === '' || $NGIRIMWA_GROUP_ID === '') {
     exit;
 }
 
-if (!is_array($data)) {
+if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
     app_log('system', 'Webhook rejected: invalid JSON payload');
     http_response_code(400);
     echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
     exit;
 }
 
-// test mode
-if (isset($data['msg']) && stripos($data['msg'], 'test') !== false) {
+// Uptime Kuma test notifications can use a top-level message.
+$testMessage = $data['msg'] ?? null;
+if (is_string($testMessage) && stripos($testMessage, 'test') !== false) {
 
     $monitorName = 'TEST-' . time();
     $status      = 'UP';
@@ -68,22 +97,40 @@ if (isset($data['msg']) && stripos($data['msg'], 'test') !== false) {
 
 } else {
 
-    $monitorName = $data['monitor']['name'] ?? null;
-    $hbStatus    = $data['heartbeat']['status'] ?? null;
+    $monitorData = isset($data['monitor']) && is_array($data['monitor']) ? $data['monitor'] : [];
+    $heartbeatData = isset($data['heartbeat']) && is_array($data['heartbeat']) ? $data['heartbeat'] : [];
+    $monitorName = $monitorData['name'] ?? null;
+    $hbStatus    = $heartbeatData['status'] ?? null;
 
-    if (!$monitorName || $hbStatus === null) {
-        app_log('system', 'Webhook rejected: monitor name or heartbeat status is missing');
+    if (!is_string($monitorName) || !in_array($hbStatus, [0, 1], true)) {
+        app_log('system', 'Webhook rejected: monitor name or heartbeat status is invalid');
         http_response_code(400);
         echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
         exit;
     }
 
-    $status = ($hbStatus == 1) ? 'UP' : 'DOWN';
+    $monitorName = trim(preg_replace('/[\x00-\x1F\x7F]+/', ' ', $monitorName));
+    $monitorName = substr($monitorName, 0, 120);
+    if ($monitorName === '') {
+        app_log('system', 'Webhook rejected: monitor name is empty');
+        http_response_code(400);
+        echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+        exit;
+    }
 
-    $rawMsg = $data['heartbeat']['msg'] ?? '-';
-    $target = substr(preg_replace('/\s+/', ' ', $rawMsg), 0, 200);
+    $status = $hbStatus === 1 ? 'UP' : 'DOWN';
 
-    $time = $data['heartbeat']['localDateTime'] ?? date("Y-m-d H:i:s");
+    $rawMsg = $heartbeatData['msg'] ?? '-';
+    if (!is_string($rawMsg)) {
+        $rawMsg = '-';
+    }
+    $target = preg_replace('/\s+/', ' ', preg_replace('/[\x00-\x1F\x7F]+/', ' ', $rawMsg));
+    $target = substr($target, 0, 200);
+
+    $rawTime = $heartbeatData['localDateTime'] ?? null;
+    $time = is_string($rawTime) && trim($rawTime) !== '' ? $rawTime : date('Y-m-d H:i:s');
+    $time = trim(preg_replace('/[\x00-\x1F\x7F]+/', ' ', $time));
+    $time = substr($time, 0, 64);
 }
 
 // load

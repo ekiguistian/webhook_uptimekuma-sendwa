@@ -103,13 +103,39 @@ UPTIME_WEBHOOK_TOKEN=
 
 ## Cron worker
 
-`api/send-queue.php` berjalan berkala untuk memeriksa perangkat dan memproses antrean. Contoh cron Linux setiap menit:
+`api/send-queue.php` memeriksa perangkat dan memproses antrean. Jadwal satu menit umum digunakan agar pesan yang menunggu segera diproses. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
+
+### Linux cron
+
+Cron Linux biasanya menggunakan PHP CLI dari sistem. Contoh entry `crontab`:
 
 ~~~cron
 * * * * * /usr/bin/php /var/www/webhook/api/send-queue.php >> /var/www/webhook/log/cron-run.log 2>&1
 ~~~
 
-Lokasi PHP CLI dan direktori project mengikuti konfigurasi server. aaPanel menjalankan command setara melalui task **Cron → Shell Script**. Panduan panel tersedia untuk [pengelolaan website](https://www.aapanel.com/docs/SubaaPanel/Website.html) dan [cron](https://www.aapanel.com/docs/Function/Cron.html).
+`/usr/bin/php` dan `/var/www/webhook` pada contoh tersebut mewakili lokasi binary PHP dan project di server.
+
+### aaPanel cron dan versi PHP
+
+Versi PHP-FPM untuk domain tercantum pada pengaturan website aaPanel. Versi tersebut dapat berbeda dari PHP CLI yang dipakai task cron. Daftar direktori PHP aaPanel dapat dilihat dari terminal:
+
+~~~bash
+ls -d /www/server/php/*/
+~~~
+
+aaPanel menamai direktori berdasarkan nomor versi tanpa titik. Contohnya, PHP 8.4 berada di `/www/server/php/84/`, dengan binary CLI `/www/server/php/84/bin/php`. Versi binary tersebut dapat diperiksa langsung:
+
+~~~bash
+/www/server/php/84/bin/php -v
+~~~
+
+`php -v` juga menunjukkan versi default CLI pada shell, tetapi cron sebaiknya memakai path absolut ke binary aaPanel yang versinya sesuai dengan kebutuhan aplikasi. Dengan PHP 8.4 dan project di `/www/wwwroot/your-domain`, contoh command cron-nya:
+
+~~~bash
+/www/server/php/84/bin/php /www/wwwroot/your-domain/api/send-queue.php >> /www/wwwroot/your-domain/log/cron-run.log 2>&1
+~~~
+
+Versi yang dipilih untuk website terlihat pada pengaturan PHP website di aaPanel. Versi default untuk perintah shell dapat dilihat pada **Advanced Setup → PHP CLI**; hasil `php -v` menunjukkan binary default shell, sedangkan path `/www/server/php/84/bin/php -v` memeriksa binary PHP 8.4 secara langsung. Direktori dapat berbeda menurut versi yang terpasang. Task cron dijalankan melalui **Cron → Add Task → Shell Script** dengan interval satu menit. Referensi aaPanel: [pengaturan website dan versi PHP](https://www.aapanel.com/docs/Function/php.html), [struktur dan perintah PHP](https://www.aapanel.com/docs/faq/Service_Manage_Commands.html), dan [cron](https://www.aapanel.com/docs/Function/Cron.html).
 
 ## Log dan operasi
 
@@ -122,3 +148,19 @@ Lokasi PHP CLI dan direktori project mengikuti konfigurasi server. aaPanel menja
 - Folder `log/` tidak dilacak Git dan diblokir dari akses HTTP pada Apache. Rotasi log mengikuti kebijakan server.
 
 Pada Nginx, perlindungan `.htaccess` tidak berlaku. Document root `public/`, konfigurasi rewrite, dan penanganan error HTTP ditentukan dalam konfigurasi server.
+
+## Keamanan
+
+Webhook menerima `POST` dengan `Content-Type: application/json`, membatasi payload hingga 32 KB, dan memvalidasi status serta nama monitor. Penolakan token dicatat paling banyak sekali per alamat sumber setiap 60 detik agar log tidak mudah dipenuhi request gagal. Pembatasan ini hanya untuk pencatatan; rate limit request dapat diterapkan di reverse proxy atau CDN.
+
+`.env`, antrean, lock, dan log runtime dikecualikan dari Git. Rahasia webhook dan API key tidak boleh masuk ke commit, issue publik, atau contoh konfigurasi. Panduan pelaporan kerentanan ada di [SECURITY.md](SECURITY.md).
+
+## Kontribusi
+
+Perbaikan kode, dokumentasi, dan usulan fitur dapat diajukan melalui [GitHub Issues](https://github.com/ekiguistian/webhook_uptimekuma-sendwa/issues) atau [Pull Requests](https://github.com/ekiguistian/webhook_uptimekuma-sendwa/pulls). Panduan kontribusi tersedia di [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Dukungan
+
+Jika project ini bermanfaat, dukungan untuk segelas kopi dapat dikirim melalui [PayPal](https://paypal.me/ekiguistian).
+
+Repository juga menyediakan tautan ini melalui `.github/FUNDING.yml`. GitHub menampilkan tombol **Sponsor** dari file tersebut jika fitur Sponsorships aktif pada pengaturan repository; lihat [dokumentasi tombol sponsor GitHub](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository).
