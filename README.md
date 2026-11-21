@@ -67,7 +67,7 @@ project/
 
 Document root diarahkan ke `public/`. Dengan susunan ini, `.env`, `api/`, dan `log/` tidak menjadi file publik. PHP-FPM memerlukan akses baca ke `.env` dan akses tulis ke file antrean/status serta log; cron worker memerlukan akses yang sama.
 
-Halaman utama juga menampilkan live monitor. Browser membaca snapshot yang disiapkan worker; request halaman tidak memanggil API NgirimWA atau Uptime Kuma secara langsung. Snapshot berada di `api/live-monitor.json`, sedangkan penghitung pesan berada di `log/delivery-metrics.json`. Endpoint publik hanya mengirim waktu, status koneksi, jumlah pesan, dan indikator apakah konfigurasi sudah terisi. Nilai API key, token, group ID, dan URL Uptime Kuma tidak dikirim ke browser.
+Halaman utama juga menampilkan live monitor. Browser membaca snapshot yang disiapkan worker; request halaman tidak memanggil API NgirimWA atau Uptime Kuma secara langsung. Snapshot berada di `api/live-monitor.json`, sedangkan penghitung pesan berada di `log/delivery-metrics.json`. Endpoint publik hanya mengirim waktu, status koneksi, jumlah pesan, dan indikator apakah konfigurasi sudah terisi. Nilai URL API, API key, token, group ID, dan URL Uptime Kuma tidak dikirim ke browser.
 
 ## URL webhook dan rewrite
 
@@ -112,7 +112,7 @@ UPTIME_STATUS_WEBSITE=https://status.example.com
 UPTIME_WEBHOOK_TOKEN=
 ~~~
 
-`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Live monitor memakai `UPTIME_STATUS_WEBSITE` sebagai target koneksi sekaligus footer notifikasi; tidak diperlukan variabel URL tambahan. Jika `NGIRIMWA_BASE_URL` kosong, aplikasi menggunakan endpoint default NgirimWA. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
+`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Live monitor memakai `UPTIME_STATUS_WEBSITE` sebagai target koneksi sekaligus footer notifikasi; tidak diperlukan variabel URL tambahan. Halaman menandai apakah `NGIRIMWA_BASE_URL` diatur secara eksplisit. Jika kosong, aplikasi tetap memakai endpoint default NgirimWA dan monitor menampilkan bahwa default sedang aktif. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
 
 ## Cron worker dan live monitor
 

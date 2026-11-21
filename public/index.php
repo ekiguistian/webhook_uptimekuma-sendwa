@@ -175,6 +175,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       </div>
 
       <div class="config-list" aria-label="Status konfigurasi">
+        <div class="config-item"><span>URL API NgirimWA</span><span class="config-value" data-config="ngirimwa_api_url">Memeriksa...</span></div>
         <div class="config-item"><span>API key NgirimWA</span><span class="config-value" data-config="api_key">Memeriksa...</span></div>
         <div class="config-item"><span>Token webhook</span><span class="config-value" data-config="webhook_token">Memeriksa...</span></div>
         <div class="config-item"><span>Group ID WhatsApp</span><span class="config-value" data-config="group_id">Memeriksa...</span></div>
@@ -292,8 +293,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
         document.querySelectorAll('[data-config]').forEach(function (element) {
           const configured = Boolean(data.configuration && data.configuration[element.dataset.config]);
-          element.textContent = configured ? 'Sudah diatur' : 'Belum diatur';
-          element.className = configured ? 'config-value ready' : 'config-value missing';
+          const defaultApiUrl = element.dataset.config === 'ngirimwa_api_url'
+            && Boolean(data.configuration && data.configuration.ngirimwa_api_url_default);
+          element.textContent = configured
+            ? 'Sudah diatur'
+            : (defaultApiUrl ? 'Belum diatur · default aktif' : 'Belum diatur');
+          element.className = configured || defaultApiUrl ? 'config-value ready' : 'config-value missing';
         });
 
         const updated = document.getElementById('monitor-updated');

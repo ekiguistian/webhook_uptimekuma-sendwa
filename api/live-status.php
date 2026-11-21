@@ -61,6 +61,8 @@ $response = [
         'failure' => max(0, (int) ($metrics['failure'] ?? 0))
     ],
     'configuration' => [
+        'ngirimwa_api_url' => app_env('NGIRIMWA_BASE_URL') !== '',
+        'ngirimwa_api_url_default' => app_env('NGIRIMWA_BASE_URL') === '',
         'api_key' => app_env('NGIRIMWA_API_KEY') !== '',
         'webhook_token' => app_env('UPTIME_WEBHOOK_TOKEN') !== '',
         'group_id' => app_env('NGIRIMWA_GROUP_ID') !== '',
