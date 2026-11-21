@@ -94,6 +94,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     button:disabled { opacity: .55; cursor: not-allowed; }
     .message { min-height: 20px; margin: 14px 0 0; color: #86efac; font-size: 14px; }
     .error { color: #fca5a5; }
+    .note { margin: 10px 0 0; color: #94a3b8; font-size: 12px; line-height: 1.6; }
   </style>
 </head>
 <body>
@@ -102,6 +103,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
     <label for="webhook-url">URL Webhook</label>
     <a class="webhook-url" id="webhook-url" href="#">Memuat URL...</a>
+    <button class="copy" id="copy-webhook-url" type="button">Salin URL</button>
+    <p class="message" id="url-copy-status" role="status" aria-live="polite"></p>
+    <p class="note">Agar URL ini dapat diakses, aktifkan URL rewrite. Apache: edit <code>public/.htaccess</code>. Nginx: tambahkan aturan di konfigurasi server domain. Petunjuk ada di README.</p>
 
     <form method="post" action="/" autocomplete="off">
       <button type="submit">Generate Token</button>
@@ -117,28 +121,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       <input id="webhook-token" type="text" value="<?= htmlspecialchars($token, ENT_QUOTES, 'UTF-8') ?>" readonly autocomplete="off" spellcheck="false" aria-label="Token webhook">
       <button class="copy" id="copy-token" type="button">Salin Token</button>
       <p class="message" id="copy-status" role="status" aria-live="polite">Simpan token ini sebelum meninggalkan halaman.</p>
-      <script>
-        document.getElementById('copy-token').addEventListener('click', async function () {
-          const field = document.getElementById('webhook-token');
-          const status = document.getElementById('copy-status');
-          try {
-            if (navigator.clipboard && window.isSecureContext) {
-              await navigator.clipboard.writeText(field.value);
-            } else {
-              field.focus();
-              field.select();
-              if (!document.execCommand('copy')) {
-                throw new Error('Clipboard copy failed');
-              }
-            }
-            status.textContent = 'Token berhasil disalin.';
-          } catch (error) {
-            field.focus();
-            field.select();
-            status.textContent = 'Salin token yang terseleksi secara manual.';
-          }
-        });
-      </script>
     <?php endif; ?>
   </main>
 
@@ -147,6 +129,51 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     const webhookLink = document.getElementById('webhook-url');
     webhookLink.href = webhookUrl;
     webhookLink.textContent = webhookUrl;
+
+    async function copyText(value) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+
+      const temporaryField = document.createElement('textarea');
+      temporaryField.value = value;
+      temporaryField.setAttribute('readonly', '');
+      temporaryField.style.position = 'fixed';
+      temporaryField.style.opacity = '0';
+      document.body.appendChild(temporaryField);
+      temporaryField.select();
+      const copied = document.execCommand('copy');
+      temporaryField.remove();
+      if (!copied) {
+        throw new Error('Clipboard copy failed');
+      }
+    }
+
+    document.getElementById('copy-webhook-url').addEventListener('click', async function () {
+      const status = document.getElementById('url-copy-status');
+      try {
+        await copyText(webhookUrl);
+        status.textContent = 'URL webhook berhasil disalin.';
+      } catch (error) {
+        status.textContent = 'URL tidak dapat disalin otomatis. Silakan salin dari tautan di atas.';
+      }
+    });
+
+    const tokenField = document.getElementById('webhook-token');
+    if (tokenField) {
+      document.getElementById('copy-token').addEventListener('click', async function () {
+        const status = document.getElementById('copy-status');
+        try {
+          await copyText(tokenField.value);
+          status.textContent = 'Token berhasil disalin.';
+        } catch (error) {
+          tokenField.focus();
+          tokenField.select();
+          status.textContent = 'Salin token yang terseleksi secara manual.';
+        }
+      });
+    }
   </script>
 </body>
 </html>
