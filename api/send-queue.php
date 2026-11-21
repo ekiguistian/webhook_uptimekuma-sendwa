@@ -310,6 +310,7 @@ if (!is_array($queue)) {
 
 $queueChanged = false;
 $now = time();
+$expiredItems = [];
 foreach ($queue as $queuedService => &$queuedItem) {
     if (!is_array($queuedItem)) {
         log_send('send-failure', 'Invalid queued message removed', [
@@ -326,6 +327,21 @@ foreach ($queue as $queuedService => &$queuedItem) {
         $queuedItem['queued_at'] = $now;
         $queueChanged = true;
     }
+
+    $deferredSince = is_numeric($queuedItem['deferred_since'] ?? null)
+        ? (int) $queuedItem['deferred_since']
+        : 0;
+    $deferredSeconds = $deferredSince > 0 ? max(0, $now - $deferredSince) : 0;
+    if ($deferredSeconds > 600) {
+        $expiredItems[] = [
+            'service' => (string) $queuedService,
+            'status' => $queuedItem['status'] ?? null,
+            'deferred_seconds' => $deferredSeconds,
+            'reason' => $queuedItem['deferred_reason'] ?? 'delivery_deferred'
+        ];
+        unset($queue[$queuedService]);
+        $queueChanged = true;
+    }
 }
 unset($queuedItem);
 if ($queueChanged && !app_write_json_array($QUEUE_FILE, $queue)) {
@@ -334,6 +350,9 @@ if ($queueChanged && !app_write_json_array($QUEUE_FILE, $queue)) {
     exit(1);
 }
 app_queue_unlock($queueLock);
+foreach ($expiredItems as $expiredItem) {
+    log_send('send-failure', 'Queued message expired after more than 10 minutes without delivery', $expiredItem);
+}
 if (empty($queue)) {
     app_log_rate_limited('cron-run', 'Worker completed: no queued messages', 'send-queue-empty', 60);
     exit;

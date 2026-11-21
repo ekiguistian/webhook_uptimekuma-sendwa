@@ -7,8 +7,9 @@ Aplikasi ini menerima notifikasi Uptime Kuma dan meneruskannya ke grup WhatsApp 
 - Menerima status monitor `UP` dan `DOWN` melalui webhook.
 - Memeriksa token webhook sebelum menerima pesan.
 - Menyimpan pesan di antrean sebelum dikirim.
-- Menahan pesan saat konfigurasi atau layanan belum siap. Pesan yang tetap tertahan lebih dari 10 menit dicatat gagal dan dihapus.
+- Menahan pesan saat konfigurasi atau layanan pengiriman belum siap. Masa tunggu 10 menit dimulai saat worker pertama kali menandai pesan tertahan; setelah lewat 10 menit, pesan dicatat gagal dan dihapus pada worker berikutnya, meskipun layanan sudah pulih.
 - Mengirim ulang status yang sama setelah jeda 10 menit sejak pesan terakhir diterima API, jika tidak ada pesan monitor itu yang masih di antrean.
+- Mengirim satu pesan antrean tertua pada setiap eksekusi worker.
 - Menghitung pesan berhasil, pesan gagal, dan status sama yang dilewati secara terpisah.
 - Menampilkan status DNS, ping ICMP, konfigurasi, dan jumlah pesan di halaman utama.
 - Membuat dan menyalin token webhook dari halaman utama.
@@ -18,8 +19,8 @@ Aplikasi ini menerima notifikasi Uptime Kuma dan meneruskannya ke grup WhatsApp 
 
 1. Uptime Kuma mengirim data JSON dan header `X-Webhook-Token` ke `/webhook`.
 2. Aplikasi memeriksa token dan memasukkan pesan ke antrean.
-3. Cron menjalankan worker. Worker memeriksa konfigurasi, API NgirimWA, dan status perangkat.
-4. Jika siap, pesan dikirim. Jika belum siap, pesan tetap di antrean hingga 10 menit.
+3. Cron menjalankan worker. Worker memeriksa konfigurasi, respons API NgirimWA, dan memastikan perangkat berstatus `connected`.
+4. Jika siap, pesan dikirim. Jika belum siap, worker menahan pesan sampai layanan pulih sebelum batas 10 menit. Setelah batas lewat, worker menghapus pesan sebagai gagal.
 5. Halaman utama membaca status dari snapshot worker. Browser tidak menghubungi API NgirimWA secara langsung.
 
 Pesan berhasil berarti API NgirimWA menerima permintaan. Itu belum memastikan pesan sudah diterima atau dibaca di WhatsApp.
@@ -57,15 +58,15 @@ UPTIME_STATUS_WEBSITE=https://status.example.com
 UPTIME_WEBHOOK_TOKEN=
 ~~~
 
-`UPTIME_STATUS_WEBSITE` dipakai pada isi pesan dan sebagai target ping. Tidak ada variabel URL tambahan untuk target Uptime Kuma.
+`UPTIME_STATUS_WEBSITE` dipakai pada isi pesan dan sebagai target ping. Jika `.env.example` atau file `.env` lama masih memiliki `UPTIME_KUMA_URL`, aplikasi tidak membacanya; gunakan `UPTIME_STATUS_WEBSITE` untuk alamat yang ditampilkan dan diuji. Token webhook harus diatur sebelum webhook dapat menerima pesan. Tanpa token, handler menolak request; pesan tidak masuk antrean.
 
 ## Antrean dan jumlah pesan
 
 - **Berhasil**: pesan yang diterima API NgirimWA.
-- **Gagal**: pesan yang gagal diproses atau tertahan lebih dari 10 menit.
+- **Gagal**: pesan antrean yang gagal diproses atau kedaluwarsa setelah tertahan lebih dari 10 menit. Request webhook yang ditolak saat validasi tidak masuk hitungan ini.
 - **Dilewati · status sama**: webhook dengan status sama dalam jeda 10 menit. Angka ini tidak menambah jumlah pesan gagal.
-- Jika ada pesan monitor yang masih di antrean, webhook baru untuk monitor itu dilewati agar tidak membuat antrean ganda.
-- Pesan uji Uptime Kuma memakai nama dan status angka acak 10 digit.
+- Jika ada pesan untuk monitor yang masih di antrean, webhook berikutnya untuk monitor itu dilewati agar tidak membuat antrean ganda. Kejadian ini tidak masuk hitungan status sama.
+- Pesan uji Uptime Kuma dikenali dari payload uji, lalu memakai nama dan status angka acak 10 digit. Kata seperti `latest` pada pesan status normal tidak dianggap sebagai uji.
 
 ## Monitor
 
@@ -88,7 +89,7 @@ public/api/             Wrapper publik untuk endpoint aplikasi
 log/                    Log sistem, pengiriman, dan cron
 ~~~
 
-Document root web server diarahkan ke folder `public/`. Dengan begitu, `.env`, `api/`, dan `log/` berada di luar akses web langsung. Folder `api/` dan `log/` perlu bisa ditulis oleh PHP-FPM dan pengguna cron.
+Document root web server diarahkan ke folder `public/`. Dengan begitu, `.env`, `api/`, dan `log/` berada di luar akses web langsung. Jalankan cron dengan akun Unix yang sama seperti PHP-FPM agar keduanya dapat memperbarui antrean dan log. Jika akun berbeda, atur hak tulis melalui grup bersama pada folder `api/` dan `log/`; hindari memberi izin akses umum seperti `777`.
 
 ## Pemasangan di aaPanel
 
@@ -102,7 +103,7 @@ Document root web server diarahkan ke folder `public/`. Dengan begitu, `.env`, `
    cp .env.example .env
    ~~~
 
-5. Pastikan pengguna website dan cron dapat menulis ke `api/` dan `log/`.
+5. Jalankan task cron dengan akun yang sama seperti PHP-FPM/website. Jika memakai akun berbeda, pastikan grup bersama memiliki hak tulis ke `api/` dan `log/`.
 6. Periksa direktori PHP aaPanel dan versinya:
 
    ~~~bash
@@ -131,7 +132,7 @@ Document root web server diarahkan ke folder `public/`. Dengan begitu, `.env`, `
 1. Pasang PHP, ekstensi cURL, dan Apache dengan PHP-FPM atau modul PHP.
 2. Tempatkan project di folder website dan arahkan `DocumentRoot` ke folder `public/`.
 3. Aktifkan `mod_rewrite` dan izinkan aturan `.htaccess` untuk website. File `public/.htaccess` sudah berisi rewrite `/webhook`.
-4. Salin `.env.example` menjadi `.env`, lalu isi konfigurasi. Pastikan pengguna web dan cron dapat menulis ke `api/` serta `log/`.
+4. Salin `.env.example` menjadi `.env`, lalu isi konfigurasi. Jalankan cron dengan akun yang sama seperti PHP-FPM/website; jika berbeda, atur grup bersama agar dapat menulis ke `api/` serta `log/`.
 5. Tambahkan dua cron berikut dengan interval satu menit. Sesuaikan lokasi PHP dan folder project:
 
    ~~~cron
@@ -145,7 +146,7 @@ Document root web server diarahkan ke folder `public/`. Dengan begitu, `.env`, `
 
 1. Pasang PHP-FPM, ekstensi cURL, dan Nginx.
 2. Tempatkan project di folder website dan atur `root` Nginx ke folder `public/`. Gunakan konfigurasi PHP-FPM yang sesuai dengan versi PHP server.
-3. Salin `.env.example` menjadi `.env`, lalu isi konfigurasi. Pastikan pengguna PHP-FPM dan cron dapat menulis ke `api/` serta `log/`.
+3. Salin `.env.example` menjadi `.env`, lalu isi konfigurasi. Jalankan cron dengan akun yang sama seperti PHP-FPM; jika berbeda, atur grup bersama agar dapat menulis ke `api/` serta `log/`.
 4. Tambahkan aturan ini di dalam blok `server { ... }` domain. Pastikan konfigurasi PHP-FPM yang sudah ada tetap menangani `/api/uptime.php`:
 
    ~~~nginx

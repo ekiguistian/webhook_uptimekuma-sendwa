@@ -77,8 +77,14 @@ if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
 
 // Uptime Kuma test notifications can use a top-level message.
 $testMessage = $data['msg'] ?? null;
-$isTestNotification = false;
-if (is_string($testMessage) && stripos($testMessage, 'test') !== false) {
+$monitorData = $data['monitor'] ?? null;
+$heartbeatData = $data['heartbeat'] ?? null;
+$isTestNotification = $monitorData === null
+    && $heartbeatData === null
+    && is_string($testMessage)
+    && preg_match('/\btest(?:ing)?\b/i', $testMessage) === 1;
+
+if ($isTestNotification) {
     try {
         $testNumber = (string) random_int(1, 9);
         for ($digitIndex = 1; $digitIndex < 10; $digitIndex++) {
@@ -100,8 +106,8 @@ if (is_string($testMessage) && stripos($testMessage, 'test') !== false) {
 
 } else {
 
-    $monitorData = isset($data['monitor']) && is_array($data['monitor']) ? $data['monitor'] : [];
-    $heartbeatData = isset($data['heartbeat']) && is_array($data['heartbeat']) ? $data['heartbeat'] : [];
+    $monitorData = is_array($monitorData) ? $monitorData : [];
+    $heartbeatData = is_array($heartbeatData) ? $heartbeatData : [];
     $monitorName = $monitorData['name'] ?? null;
     $hbStatus    = $heartbeatData['status'] ?? null;
 
