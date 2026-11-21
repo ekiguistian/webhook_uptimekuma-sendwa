@@ -4,10 +4,33 @@ require_once __DIR__ . '/config.php';
 
 $NGIRIMWA_API_KEY  = app_env('NGIRIMWA_API_KEY');
 $NGIRIMWA_GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
-$MESSAGE_SIGNATURE = app_env('UPTIME_MESSAGE_SIGNATURE', 'Nexan Network Monitoring');
-$STATUS_WEBSITE    = app_env('UPTIME_STATUS_WEBSITE', 'https://status-server.nexan.id');
+$MESSAGE_SIGNATURE = app_env('UPTIME_MESSAGE_SIGNATURE', 'Server Monitoring');
+$STATUS_WEBSITE    = app_env('UPTIME_STATUS_WEBSITE', 'https://status.example.com');
 
 header('Content-Type: application/json; charset=utf-8');
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    header('Allow: POST');
+    http_response_code(405);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+    exit;
+}
+
+$webhookToken = app_env('UPTIME_WEBHOOK_TOKEN');
+if ($webhookToken === '') {
+    app_log('system', 'Webhook unavailable because authentication token is not configured');
+    http_response_code(503);
+    echo json_encode(["ok"=>false, "message"=>"Service temporarily unavailable"]);
+    exit;
+}
+
+$providedToken = $_SERVER['HTTP_X_WEBHOOK_TOKEN'] ?? '';
+if (!is_string($providedToken) || !hash_equals($webhookToken, $providedToken)) {
+    app_log('system', 'Webhook rejected: authentication token is missing or invalid');
+    http_response_code(401);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+    exit;
+}
 
 $QUEUE_FILE  = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';

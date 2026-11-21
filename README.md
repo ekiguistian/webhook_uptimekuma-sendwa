@@ -1,133 +1,159 @@
-# Uptime Kuma → NgirimWA
+# Uptime Kuma ke WhatsApp melalui NgirimWA
 
-Integrasi ini menerima webhook perubahan status dari Uptime Kuma, menyimpannya ke antrean lokal, lalu mengirim notifikasi WhatsApp melalui API NgirimWA.
+Aplikasi PHP ini menerima notifikasi status dari Uptime Kuma, memasukkannya ke antrean lokal, lalu mengirim pesan ke grup WhatsApp melalui API NgirimWA. Aplikasi menyediakan autentikasi token untuk webhook, worker cron, dan pencatatan log.
 
-## Struktur direktori
+## Fitur
 
-~~~text
-project/
-├── .env                         # rahasia dan pengaturan lokal; jangan commit
-├── .env.example                 # template tanpa API key
-├── api/
-│   ├── config.php               # membaca .env
-│   ├── uptime.php               # memvalidasi webhook dan membuat pesan antrean
-│   ├── send-queue.php           # worker yang dijalankan cron
-│   ├── queue.json               # antrean runtime
-│   └── last-status.json         # status terakhir yang diterima NgirimWA
-├── log/                         # seluruh log aplikasi dan PHP
-│   ├── system.log
-│   ├── send-success.log
-│   ├── send-failure.log
-│   ├── php-error.log
-│   └── cron-run.log
-└── public/
-    ├── index.php                # halaman informasi umum
-    └── api/uptime.php           # pintu masuk HTTP menuju api/uptime.php
-~~~
+- Meneruskan notifikasi status UP/DOWN dan pemulihan ke WhatsApp.
+- Melindungi endpoint webhook dengan header rahasia `X-Webhook-Token`.
+- Menyediakan halaman untuk membuat dan menyalin token.
+- Mengecek status perangkat NgirimWA sebelum mengirim pesan.
+- Mencatat aktivitas, keberhasilan, kegagalan, dan error PHP di folder `log/`.
+- Menyediakan URL webhook tanpa ekstensi PHP: `/webhook`.
 
 ## Alur sistem
 
 ~~~mermaid
 flowchart LR
-  Kuma["Uptime Kuma"] -->|POST JSON| Entry["public/api/uptime.php"]
-  Entry --> Core["api/uptime.php"]
-  Core -->|Baca konfigurasi| Env[".env di root project"]
-  Core -->|Simpan perubahan status| Queue["api/queue.json"]
+  Kuma["Uptime Kuma"] -->|POST JSON + X-Webhook-Token| Web["/webhook"]
+  Web -->|rewrite internal| Handler["api/uptime.php"]
+  Env[".env"] --> Auth{"Token cocok?"}
+  Handler --> Auth
+  Auth -->|tidak| Reject["HTTP 401 + log"]
+  Auth -->|ya| Queue["api/queue.json"]
   Cron["Cron Linux / aaPanel"] --> Worker["api/send-queue.php"]
   Queue --> Worker
-  Worker -->|GET status, x-api-key| Status["NgirimWA /devices/status"]
+  Worker -->|GET status| Status["NgirimWA /devices/status"]
   Status -->|connected| Send["POST /messages/send"]
-  Status -->|gagal atau offline| Failure["hapus antrean + log gagal"]
-  Send -->|diterima| Group["Grup WhatsApp"]
+  Status -->|gagal/offline| Failure["hapus antrean + log gagal"]
+  Send --> Group["Grup WhatsApp"]
   Worker --> Logs["Folder log/"]
 ~~~
 
-1. Uptime Kuma mengirim JSON ke endpoint webhook.
-2. Pintu masuk publik meneruskan request ke handler yang berada di luar document root.
-3. Handler membaca konfigurasi dari .env, mengabaikan status yang sama atau sudah mengantre, lalu menyimpan pesan alert/recovery ke api/queue.json.
-4. Cron menjalankan worker. Setiap eksekusi memproses maksimal satu pesan yang siap dikirim.
-5. Sebelum mengirim, worker mengecek akses API dan status perangkat lewat GET /devices/status. Hanya status connected yang dilanjutkan ke POST /messages/send. NgirimWA mendokumentasikan endpoint dan nilai status ini di [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat).
-6. Jika pemeriksaan API/perangkat gagal, semua item yang sedang menunggu dihapus dan dicatat sebagai gagal. Jika satu pengiriman pesan gagal, item itu dihapus dan tidak dicoba ulang. Pesan gagal tidak akan terkirim otomatis ketika koneksi pulih.
+1. Uptime Kuma mengirim payload JSON dan header `X-Webhook-Token` ke `/webhook`.
+2. Web server menulis ulang `/webhook` ke handler PHP. Handler memvalidasi token sebelum memproses payload.
+3. Status baru yang valid disimpan di `api/queue.json`. Status yang sama atau sudah mengantre dilewati.
+4. Cron menjalankan worker. Setiap eksekusi memproses maksimal satu pesan.
+5. Worker memeriksa API dan status perangkat NgirimWA melalui `GET /devices/status`. Pesan dikirim melalui `POST /messages/send` hanya jika perangkat berstatus `connected`.
+6. Jika pemeriksaan API/perangkat gagal, antrean yang menunggu dihapus dan kegagalan dicatat. Pesan yang gagal tidak dicoba ulang otomatis.
 
-Worker mengatur expires_in ke 30 detik. Ini membatasi lama pesan berada di antrean internal NgirimWA jika perangkat terputus tepat setelah pemeriksaan status. Karena NgirimWA mengantrekan pesan yang diterima, kondisi putus yang terjadi di sela pemeriksaan dan request kirim masih dapat membuat pesan diterima oleh antrean provider; API pembatalan antrean provider tidak dipakai di integrasi ini. Lihat [panduan kirim pesan NgirimWA](https://panduan.ngirimwa.com/api/kirim-pesan).
+NgirimWA dapat menerima pesan ke antrean layanan sebelum pesan terkirim ke WhatsApp. Worker mengatur `expires_in` menjadi 30 detik untuk membatasi masa tunggu. Respons sukses API berarti pesan diterima ke antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Lihat [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat) dan [panduan kirim pesan](https://panduan.ngirimwa.com/api/kirim-pesan).
 
-HTTP sukses dari NgirimWA berarti pesan diterima ke antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Worker mencatat tracking ID di log/send-success.log. Pelacakan status akhir belum dihubungkan.
-
-## Fungsi public/index.php
-
-public/index.php hanyalah halaman informasi yang tampil saat domain dibuka di browser. Halaman ini menjelaskan bahwa domain dipakai oleh Uptime Kuma dan menampilkan URL webhook. Halaman tersebut tidak menerima webhook, tidak mengirim pesan, dan tidak mengecek cron atau koneksi NgirimWA. Badge dan tag noindex hanya informasi/SEO, bukan perlindungan akses.
-
-URL webhook yang dipasang di Uptime Kuma:
+## Struktur direktori
 
 ~~~text
-https://webhook.nexan.id/api/uptime.php
+project/
+├── .env                         # konfigurasi rahasia; jangan commit
+├── .env.example                 # contoh konfigurasi
+├── api/
+│   ├── config.php               # membaca .env dan mengatur log
+│   ├── uptime.php               # validasi webhook dan membuat antrean
+│   ├── send-queue.php           # worker cron
+│   ├── queue.json               # antrean runtime
+│   └── last-status.json         # status monitor terakhir
+├── log/                         # log aplikasi, PHP, dan cron
+└── public/
+    ├── index.php                # halaman utama dan generator token
+    ├── .htaccess                # rewrite URL untuk Apache
+    └── api/uptime.php           # wrapper publik menuju handler
 ~~~
 
-Endpoint mengharapkan payload JSON yang memiliki monitor.name dan heartbeat.status. Field heartbeat.msg serta heartbeat.localDateTime digunakan sebagai informasi tambahan bila tersedia.
+## Instalasi
 
-## Konfigurasi
+### 1. Siapkan server dan file aplikasi
 
-Di root project, salin .env.example menjadi .env, lalu isi:
+Siapkan server dengan PHP untuk web dan CLI serta ekstensi cURL. Unduh atau clone repository ini ke direktori project. Arahkan **document root** domain ke folder `public`, bukan ke root project. Dengan begitu, `.env`, `api/`, dan `log/` berada di luar document root.
 
-~~~dotenv
-NGIRIMWA_API_KEY=API_key_dari_dashboard
-NGIRIMWA_GROUP_ID=ID_grup_WhatsApp@g.us
-NGIRIMWA_BASE_URL=https://dash.ngirimwa.com/api/v1
-UPTIME_MESSAGE_SIGNATURE=Nexan Network Monitoring
-UPTIME_STATUS_WEBSITE=https://status-server.nexan.id
-~~~
-
-API key dibuat di Dashboard NgirimWA → Perangkat → Kunci API. ID grup biasanya berakhiran @g.us. Signature dan URL website di atas menjadi footer pesan dan dapat diubah tanpa mengedit PHP.
-
-.env dikecualikan dari Git; hanya .env.example yang dipush. Simpan .env dan api/ di luar document root. Akun PHP/cron perlu membaca .env dan menulis file antrean/status di api/ serta file log di log/. Batasi izin folder tersebut ke akun layanan; jangan gunakan permission 777.
-
-## Deploy di Linux
-
-Contoh struktur deployment:
+Contoh struktur server:
 
 ~~~text
 /var/www/webhook/
 ├── .env
 ├── api/
 ├── log/
-└── public/
+└── public/                     # document root domain
 ~~~
 
-Atur document root web server ke /var/www/webhook/public. URL /api/uptime.php dilayani oleh wrapper public/api/uptime.php, sedangkan worker cron tetap berada di luar document root.
+Salin `.env.example` menjadi `.env`, lalu isi konfigurasi:
 
-Pastikan PHP CLI dan ekstensi cURL tersedia. Salin .env.example menjadi .env, isi pengaturannya, lalu atur owner/permission agar PHP-FPM dan cron dapat membaca .env dan menulis file di api/ serta log/. Jangan gunakan permission 777.
+~~~dotenv
+NGIRIMWA_API_KEY=api_key_dari_dashboard
+NGIRIMWA_GROUP_ID=id_grup_WhatsApp@g.us
+NGIRIMWA_BASE_URL=https://dash.ngirimwa.com/api/v1
+UPTIME_MESSAGE_SIGNATURE=Server Monitoring
+UPTIME_STATUS_WEBSITE=https://status.example.com
+UPTIME_WEBHOOK_TOKEN=
+~~~
 
-Cari lokasi PHP CLI dengan command -v php dan lihat versinya dengan php -v. Buat cron setiap satu menit dengan crontab -e:
+Buat API key melalui Dashboard NgirimWA → Perangkat → Kunci API. Isi ID grup WhatsApp tujuan. `UPTIME_MESSAGE_SIGNATURE` dan `UPTIME_STATUS_WEBSITE` digunakan sebagai footer pesan dan dapat diganti sesuai kebutuhan.
+
+Atur izin agar PHP-FPM dapat membaca `.env` serta menulis file antrean/status di `api/` dan log di `log/`. Cron juga harus dapat membaca `.env` dan menulis log. Batasi izin ke akun layanan; jangan gunakan permission `777`.
+
+### 2. Aktifkan URL webhook tanpa ekstensi `.php`
+
+URL webhook yang dipakai adalah:
+
+~~~text
+https://domain-anda/webhook
+~~~
+
+Web server menulis ulang URL tersebut secara internal ke `public/api/uptime.php`.
+
+**Apache:** aturan sudah tersedia di `public/.htaccess`. Pastikan `mod_rewrite` aktif dan virtual host mengizinkan aturan `.htaccess` (minimal `AllowOverride FileInfo`). Document root harus mengarah ke folder `public`.
+
+**Nginx / aaPanel dengan Nginx:** Nginx tidak membaca `.htaccess`. Tambahkan aturan berikut di dalam blok `server { ... }` domain, dan biarkan konfigurasi PHP-FPM yang sudah ada menangani `/api/uptime.php`:
+
+~~~nginx
+rewrite ^/webhook/?$ /api/uptime.php last;
+~~~
+
+Simpan konfigurasi dan reload Nginx. Jika aturan belum diterapkan, URL `/webhook` tidak akan mencapai handler.
+
+### 3. Buat token dan konfigurasi Uptime Kuma
+
+1. Buka halaman utama aplikasi melalui HTTPS, misalnya `https://domain-anda/`.
+2. Klik **Generate Token**, lalu **Salin Token**. Halaman menampilkan URL webhook sesuai domain yang sedang dibuka. Token dibuat secara acak dan tidak disimpan oleh aplikasi.
+3. Tempel token ke `UPTIME_WEBHOOK_TOKEN` di `.env` pada server.
+4. Di Uptime Kuma, buat notifikasi **Webhook**, pilih metode **POST**, lalu aktifkan **Additional Headers** dan masukkan header berikut dengan token yang sama:
+
+~~~json
+{
+  "X-Webhook-Token": "tempel_token_di_sini"
+}
+~~~
+
+5. Gunakan URL `/webhook` yang ditampilkan di halaman utama. Simpan rahasia tersebut hanya di `.env` server dan konfigurasi Uptime Kuma. Jangan commit token ke Git atau membagikannya. Jika token diganti, perbarui `.env` dan header Uptime Kuma dengan token baru yang sama.
+
+Webhook mengembalikan HTTP 503 bila token belum diatur di `.env`, dan HTTP 401 bila header hilang atau tidak cocok. Gunakan HTTPS agar token tidak dikirim melalui koneksi yang tidak terenkripsi.
+
+### 4. Atur cron worker
+
+Worker harus dijalankan berkala untuk mengirim pesan dari antrean.
+
+**Linux:** cari lokasi PHP CLI dengan `command -v php`, lalu tambahkan cron melalui `crontab -e`:
 
 ~~~cron
 * * * * * /usr/bin/php /var/www/webhook/api/send-queue.php >> /var/www/webhook/log/cron-run.log 2>&1
 ~~~
 
-Ganti /usr/bin/php dan /var/www/webhook dengan lokasi yang benar di server. Jalankan command worker sekali secara manual untuk memeriksa konfigurasi dan permission sebelum mengaktifkan cron.
+Sesuaikan lokasi PHP dan direktori project. Jalankan command sekali secara manual untuk memeriksa konfigurasi dan izin file.
 
-## Deploy di aaPanel
-
-1. Tambahkan domain sebagai website PHP.
-2. Di pengaturan Site Directory/Document Root, arahkan root website ke folder project/public. Ikuti versi aaPanel yang digunakan; lihat panduan resmi [Website aaPanel](https://www.aapanel.com/docs/SubaaPanel/Website.html).
-3. Pastikan versi PHP yang dipilih menyediakan cURL. Worker CLI tetap perlu binary PHP CLI yang sesuai.
-4. Letakkan .env di root project, isi key, ID grup, URL gateway, signature, dan URL website. Pastikan akun yang menjalankan PHP dan cron memiliki permission yang sesuai.
-5. Buka menu Cron → Add Task → Shell Script. Beri nama, atur Execution cycle ke setiap 1 menit, lalu isi Script content dengan command berikut. Ganti path versi PHP dan direktori project sesuai server:
+**aaPanel:** buat task melalui **Cron → Add Task → Shell Script**, atur jadwal setiap satu menit, lalu gunakan command dengan path server Anda. Contoh:
 
 ~~~bash
-/www/server/php/83/bin/php /www/wwwroot/webhook.nexan.id/api/send-queue.php >> /www/wwwroot/webhook.nexan.id/log/cron-run.log 2>&1
+/www/server/php/83/bin/php /www/wwwroot/your-domain/api/send-queue.php >> /www/wwwroot/your-domain/log/cron-run.log 2>&1
 ~~~
 
-6. Klik Execute satu kali, lalu periksa Log task. Setelah berhasil, aktifkan jadwalnya. Panduan resmi aaPanel menjelaskan bahwa Shell Script cron sebaiknya memakai path absolut dan environment cron dapat berbeda dari shell interaktif: [Cron aaPanel](https://www.aapanel.com/docs/Function/Cron.html).
+Sesuaikan versi PHP dan `your-domain`. Jalankan task sekali melalui **Execute**, periksa log, lalu aktifkan jadwalnya. Lihat panduan aaPanel untuk [website](https://www.aapanel.com/docs/SubaaPanel/Website.html) dan [cron](https://www.aapanel.com/docs/Function/Cron.html).
 
 ## Log dan penanganan error
 
-- log/system.log berisi aktivitas umum aplikasi dan merangkum keberhasilan maupun kegagalan.
-- log/send-success.log mencatat pesan yang diterima NgirimWA, termasuk tracking ID.
-- log/send-failure.log mencatat pemeriksaan API/perangkat yang gagal dan pesan yang ditolak/gagal.
-- log/php-error.log menjadi tujuan warning/fatal error PHP. Detail error tidak ditampilkan ke browser; endpoint hanya memberi respons umum.
-- log/cron-run.log menampung output command cron Linux/aaPanel. Log task aaPanel juga dapat dilihat dari menu Cron → Log.
-- Folder log/ tidak masuk Git dan diblokir dari akses HTTP pada Apache. Pastikan PHP/cron bisa menulis ke folder ini.
-- API key 401/403 membuat pengiriman dihentikan untuk key tersebut. Perbaiki key/langganan; bila hanya langganan yang diperbaiki, hapus api/ngirimwa-auth.lock. Item yang sudah dinyatakan gagal tetap tidak dikirim ulang.
-- Log akses web server dan log panel aaPanel tetap mengikuti lokasi yang dikonfigurasi di server; folder log/ menampung log aplikasi, PHP, dan output cron proyek.
+- `log/system.log` berisi aktivitas umum dan ringkasan pengiriman.
+- `log/send-success.log` mencatat pesan yang diterima NgirimWA, termasuk tracking ID.
+- `log/send-failure.log` mencatat pemeriksaan API/perangkat atau pengiriman yang gagal.
+- `log/php-error.log` menampung warning dan fatal error PHP. Detail error tidak ditampilkan di browser.
+- `log/cron-run.log` menampung output cron Linux/aaPanel.
+- Penolakan autentikasi webhook dicatat tanpa mencatat token atau isi payload.
+- Folder `log/` tidak masuk Git dan diblokir dari akses HTTP pada Apache. Atur rotasi log sesuai kebijakan server.
 
-Atur display_errors=Off pada konfigurasi PHP aaPanel/server sebagai lapisan tambahan. Pada Nginx, .htaccess tidak berlaku; document root harus tetap public agar .env, api/, dan log/ tidak bisa diakses langsung, dan konfigurasi server perlu memakai halaman error umum untuk 4xx/5xx.
+Pada Nginx, `.htaccess` tidak berlaku. Pastikan document root tetap `public`, atur rewrite di konfigurasi server, dan gunakan halaman error umum untuk error 4xx/5xx.
