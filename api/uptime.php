@@ -11,26 +11,25 @@ header('Content-Type: application/json; charset=utf-8');
 
 $QUEUE_FILE  = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';
-$LOG_FILE    = __DIR__ . '/app.log';
 
 $raw = file_get_contents("php://input");
 $data = json_decode($raw, true);
 
 function log_msg($msg) {
-    global $LOG_FILE;
-    file_put_contents($LOG_FILE, date('c')." | ".$msg.PHP_EOL, FILE_APPEND | LOCK_EX);
+    app_log('system', $msg);
 }
 
 if ($NGIRIMWA_API_KEY === '' || $NGIRIMWA_GROUP_ID === '') {
-    log_msg("CONFIG ERROR: missing NGIRIMWA_API_KEY or NGIRIMWA_GROUP_ID");
-    http_response_code(500);
-    echo json_encode(["ok"=>false, "error"=>"Configuration missing"]);
+    app_log('system', 'Webhook unavailable because required configuration is missing');
+    http_response_code(503);
+    echo json_encode(["ok"=>false, "message"=>"Service temporarily unavailable"]);
     exit;
 }
 
 if (!is_array($data)) {
+    app_log('system', 'Webhook rejected: invalid JSON payload');
     http_response_code(400);
-    echo json_encode(["ok"=>false, "error"=>"Invalid JSON payload"]);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
     exit;
 }
 
@@ -50,8 +49,9 @@ if (isset($data['msg']) && stripos($data['msg'], 'test') !== false) {
     $hbStatus    = $data['heartbeat']['status'] ?? null;
 
     if (!$monitorName || $hbStatus === null) {
-        log_msg("INVALID");
-        echo json_encode(["ok"=>true]);
+        app_log('system', 'Webhook rejected: monitor name or heartbeat status is missing');
+        http_response_code(400);
+        echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
         exit;
     }
 
@@ -64,26 +64,36 @@ if (isset($data['msg']) && stripos($data['msg'], 'test') !== false) {
 }
 
 // load
-$queue = file_exists($QUEUE_FILE)
-    ? json_decode(file_get_contents($QUEUE_FILE), true)
-    : [];
+$queueLock = app_queue_lock();
+if ($queueLock === false) {
+    app_log('system', 'Webhook could not acquire the queue lock');
+    http_response_code(503);
+    echo json_encode(["ok"=>false, "message"=>"Service temporarily unavailable"]);
+    exit;
+}
 
-$lastStatus = file_exists($STATUS_FILE)
-    ? json_decode(file_get_contents($STATUS_FILE), true)
-    : [];
-
-if (!is_array($queue)) $queue = [];
-if (!is_array($lastStatus)) $lastStatus = [];
+$queue = app_read_json_array($QUEUE_FILE);
+$lastStatus = app_read_json_array($STATUS_FILE);
+if (!is_array($queue)) {
+    app_log('system', 'Queue file is invalid; treating it as empty');
+    $queue = [];
+}
+if (!is_array($lastStatus)) {
+    app_log('system', 'Last status file is invalid; treating it as empty');
+    $lastStatus = [];
+}
 
 // skip same
 if (($lastStatus[$monitorName] ?? null) === $status) {
     log_msg("SKIP SAME: $monitorName");
+    app_queue_unlock($queueLock);
     exit;
 }
 
 // skip queued
 if (isset($queue[$monitorName])) {
     log_msg("SKIP QUEUED: $monitorName");
+    app_queue_unlock($queueLock);
     exit;
 }
 
@@ -108,15 +118,17 @@ $queue[$monitorName] = [
     "message"   => substr($text, 0, 3500)
 ];
 
-$queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-if ($queueJson === false || file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX) === false) {
+$queueSaved = app_write_json_array($QUEUE_FILE, $queue);
+if (!$queueSaved) {
     log_msg("QUEUE ERROR: could not save message for $monitorName");
+    app_queue_unlock($queueLock);
     http_response_code(500);
-    echo json_encode(["ok"=>false, "error"=>"Could not queue message"]);
+    echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
     exit;
 }
 
 log_msg("QUEUED: $monitorName ($status)");
+app_queue_unlock($queueLock);
 
 echo json_encode([
     "ok" => true,

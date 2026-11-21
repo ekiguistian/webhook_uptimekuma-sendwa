@@ -2,24 +2,140 @@
 
 require_once __DIR__ . '/config.php';
 
+if (PHP_SAPI !== 'cli') {
+    app_log('system', 'Web request to the cron worker was rejected');
+    http_response_code(404);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'Not found.';
+    exit;
+}
+
 $API_KEY = app_env('NGIRIMWA_API_KEY');
 $GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
 $API_BASE_URL = rtrim(app_env('NGIRIMWA_BASE_URL', 'https://dash.ngirimwa.com/api/v1'), '/');
+$DEVICE_STATUS_URL = $API_BASE_URL . '/devices/status';
 $SEND_URL = $API_BASE_URL . '/messages/send';
 
-$QUEUE_FILE  = __DIR__ . '/queue.json';
+$QUEUE_FILE = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';
-$LOG_FILE    = __DIR__ . '/send.log';
 $AUTH_BLOCK_FILE = __DIR__ . '/ngirimwa-auth.lock';
 
-function log_send($message) {
-    global $LOG_FILE;
-    file_put_contents($LOG_FILE, date('c') . ' | ' . $message . PHP_EOL, FILE_APPEND | LOCK_EX);
+function log_send($channel, $message, $context = [])
+{
+    app_log($channel, $message, $context);
 }
 
-if ($API_KEY === '' || $GROUP_ID === '') {
-    log_send('CONFIG ERROR: missing NGIRIMWA_API_KEY or NGIRIMWA_GROUP_ID');
-    exit(1);
+function drop_queue($reason, $context = [])
+{
+    global $QUEUE_FILE;
+    $queueLock = app_queue_lock();
+    if ($queueLock === false) {
+        log_send('system', 'Could not lock the queue while clearing failed messages');
+        return false;
+    }
+
+    $queue = app_read_json_array($QUEUE_FILE);
+    if (!is_array($queue)) {
+        $queue = [];
+    }
+    foreach ($queue as $service => $item) {
+        $entryContext = [
+            'service' => (string) $service,
+            'reason' => $reason
+        ];
+        if (is_array($item) && isset($item['status'])) {
+            $entryContext['status'] = $item['status'];
+        }
+        log_send('send-failure', 'Queued message dropped without retry', $entryContext + $context);
+    }
+
+    $cleared = app_write_json_array($QUEUE_FILE, []);
+    app_queue_unlock($queueLock);
+    if (!$cleared) {
+        log_send('system', 'Could not clear the send queue after a failure');
+        return false;
+    }
+    return true;
+}
+
+function remove_queue_item($service)
+{
+    global $QUEUE_FILE;
+    $queueLock = app_queue_lock();
+    if ($queueLock === false) {
+        log_send('system', 'Could not lock the queue while removing a failed item', ['service' => (string) $service]);
+        return false;
+    }
+
+    $queue = app_read_json_array($QUEUE_FILE);
+    if (!is_array($queue)) {
+        $queue = [];
+    }
+    unset($queue[$service]);
+    $removed = app_write_json_array($QUEUE_FILE, $queue);
+    app_queue_unlock($queueLock);
+    if (!$removed) {
+        log_send('system', 'Could not remove a processed item from the send queue', ['service' => (string) $service]);
+        return false;
+    }
+    return true;
+}
+
+function persist_queue_item($service, $message, $idempotencyKey)
+{
+    global $QUEUE_FILE;
+    $queueLock = app_queue_lock();
+    if ($queueLock === false) {
+        return false;
+    }
+
+    $queue = app_read_json_array($QUEUE_FILE);
+    if (!is_array($queue) || !isset($queue[$service])) {
+        app_queue_unlock($queueLock);
+        return false;
+    }
+
+    $queue[$service]['message'] = $message;
+    $queue[$service]['idempotency_key'] = $idempotencyKey;
+    unset($queue[$service]['payload']);
+    $saved = app_write_json_array($QUEUE_FILE, $queue);
+    app_queue_unlock($queueLock);
+    return $saved;
+}
+
+function complete_queue_item($service, $status)
+{
+    global $QUEUE_FILE, $STATUS_FILE;
+    $queueLock = app_queue_lock();
+    if ($queueLock === false) {
+        log_send('system', 'Could not lock queue after NgirimWA accepted a message', ['service' => (string) $service]);
+        return false;
+    }
+
+    $queue = app_read_json_array($QUEUE_FILE);
+    $lastStatus = app_read_json_array($STATUS_FILE);
+    if (!is_array($queue)) {
+        $queue = [];
+    }
+    if (!is_array($lastStatus)) {
+        $lastStatus = [];
+    }
+
+    $lastStatus[$service] = $status;
+    $statusSaved = app_write_json_array($STATUS_FILE, $lastStatus);
+    unset($queue[$service]);
+    $queueSaved = app_write_json_array($QUEUE_FILE, $queue);
+    app_queue_unlock($queueLock);
+
+    if (!$statusSaved) {
+        log_send('system', 'Could not update last-status.json after NgirimWA accepted a message', [
+            'service' => (string) $service
+        ]);
+    }
+    if (!$queueSaved) {
+        log_send('system', 'Could not remove accepted item from the send queue', ['service' => (string) $service]);
+    }
+    return $statusSaved && $queueSaved;
 }
 
 // Avoid overlapping cron executions.
@@ -31,68 +147,138 @@ if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
     exit;
 }
 
+$queueLock = app_queue_lock();
+if ($queueLock === false) {
+    log_send('system', 'Could not lock the queue before processing');
+    exit(1);
+}
+$queue = app_read_json_array($QUEUE_FILE);
+
+if (!is_array($queue)) {
+    log_send('system', 'Send queue is invalid JSON; clearing it to prevent stale sends');
+    app_write_json_array($QUEUE_FILE, []);
+    app_queue_unlock($queueLock);
+    exit(1);
+}
+
+$removedOldFailures = false;
+foreach ($queue as $queuedService => $queuedItem) {
+    if (!is_array($queuedItem)) {
+        continue;
+    }
+    if (!empty($queuedItem['blocked_error']) || !empty($queuedItem['attempts']) || !empty($queuedItem['next_attempt_at'])) {
+        log_send('send-failure', 'Previously failed queue item dropped without retry', [
+            'service' => (string) $queuedService,
+            'error_code' => $queuedItem['blocked_error'] ?? null
+        ]);
+        unset($queue[$queuedService]);
+        $removedOldFailures = true;
+    }
+}
+if ($removedOldFailures && !app_write_json_array($QUEUE_FILE, $queue)) {
+    log_send('system', 'Could not remove previously failed items from the queue');
+}
+app_queue_unlock($queueLock);
+if (empty($queue)) {
+    exit;
+}
+
+if ($API_KEY === '' || $GROUP_ID === '') {
+    log_send('send-failure', 'Send worker configuration is incomplete');
+    drop_queue('configuration_missing');
+    exit(1);
+}
+
 $apiKeyFingerprint = hash('sha256', $API_KEY);
 $authBlock = file_exists($AUTH_BLOCK_FILE)
     ? json_decode(file_get_contents($AUTH_BLOCK_FILE), true)
     : null;
 if (is_array($authBlock) && ($authBlock['api_key_hash'] ?? '') === $apiKeyFingerprint) {
-    log_send('AUTH BLOCKED: NgirimWA returned 401/403 for this API key; update the key before retrying');
+    drop_queue('authentication_blocked');
     exit(1);
 }
 if (file_exists($AUTH_BLOCK_FILE)) {
     unlink($AUTH_BLOCK_FILE);
 }
 
-$queue = file_exists($QUEUE_FILE)
-    ? json_decode(file_get_contents($QUEUE_FILE), true)
-    : [];
-
-if (!is_array($queue) || empty($queue)) {
-    exit;
+// Check both API reachability/authentication and the WhatsApp device state first.
+$check = curl_init($DEVICE_STATUS_URL);
+if ($check === false) {
+    drop_queue('device_check_unavailable');
+    exit(1);
 }
+curl_setopt_array($check, [
+    CURLOPT_HTTPGET => true,
+    CURLOPT_HTTPHEADER => [
+        'x-api-key: ' . $API_KEY,
+        'Accept: application/json'
+    ],
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_CONNECTTIMEOUT => 5,
+    CURLOPT_TIMEOUT => 10
+]);
 
-// FIFO, skipping items that are waiting for a retry or need manual correction.
-uasort($queue, function ($a, $b) {
-    return ($a['queued_at'] ?? 0) <=> ($b['queued_at'] ?? 0);
-});
+$checkResponse = curl_exec($check);
+$checkHttpCode = curl_getinfo($check, CURLINFO_HTTP_CODE);
+$checkError = curl_error($check);
+curl_close($check);
 
-$service = null;
-$item = null;
-foreach ($queue as $candidateService => $candidateItem) {
-    if (!empty($candidateItem['blocked_error'])) {
-        continue;
+$checkResult = is_string($checkResponse) ? json_decode($checkResponse, true) : null;
+$deviceStatus = is_array($checkResult) ? ($checkResult['data']['status'] ?? null) : null;
+$apiAvailable = $checkError === ''
+    && $checkHttpCode >= 200
+    && $checkHttpCode < 300
+    && is_array($checkResult)
+    && ($checkResult['success'] ?? false) === true;
+$deviceReady = $apiAvailable && $deviceStatus === 'connected';
+
+if (!$deviceReady) {
+    $errorCode = is_array($checkResult) ? ($checkResult['details']['code'] ?? null) : null;
+    if ($checkHttpCode === 401 || $checkHttpCode === 403) {
+        $authBlockJson = json_encode([
+            'api_key_hash' => $apiKeyFingerprint,
+            'blocked_at' => date('c')
+        ], JSON_PRETTY_PRINT);
+        if ($authBlockJson !== false) {
+            file_put_contents($AUTH_BLOCK_FILE, $authBlockJson, LOCK_EX);
+        }
     }
-    if (($candidateItem['next_attempt_at'] ?? 0) > time()) {
-        continue;
-    }
-    $service = $candidateService;
-    $item = $candidateItem;
-    break;
-}
-if ($service === null || !is_array($item)) {
-    exit;
-}
 
-// Accept queued messages from the previous gateway format during migration.
-$message = $item['message'] ?? ($item['payload']['message'] ?? null);
-if (!is_string($message) || $message === '') {
-    log_send('QUEUE ERROR: missing message for ' . $service);
+    drop_queue('api_or_device_unavailable', [
+        'http_code' => $checkHttpCode,
+        'device_status' => $deviceStatus,
+        'error_code' => $errorCode,
+        'curl_error' => $checkError
+    ]);
     exit(1);
 }
 
-$idempotencyKey = $item['idempotency_key'] ?? null;
-if (!is_string($idempotencyKey) || $idempotencyKey === '') {
-    $idempotencyKey = bin2hex(random_bytes(16));
-    $queue[$service]['idempotency_key'] = $idempotencyKey;
+// FIFO: at most one message is sent per cron execution.
+uasort($queue, function ($a, $b) {
+    return ($a['queued_at'] ?? 0) <=> ($b['queued_at'] ?? 0);
+});
+$service = array_key_first($queue);
+$item = $queue[$service];
+
+// Accept queued messages from the previous gateway format during migration.
+$message = is_array($item)
+    ? ($item['message'] ?? ($item['payload']['message'] ?? null))
+    : null;
+if (!is_string($message) || $message === '') {
+    log_send('send-failure', 'Queue item does not contain a valid message', ['service' => (string) $service]);
+    remove_queue_item($service);
+    exit(1);
 }
 
-// Do not keep old gateway credentials or destination data in the queue.
-$queue[$service]['message'] = $message;
-unset($queue[$service]['payload']);
+$idempotencyKey = is_array($item) ? ($item['idempotency_key'] ?? null) : null;
+if (!is_string($idempotencyKey) || $idempotencyKey === '') {
+    $idempotencyKey = bin2hex(random_bytes(16));
+}
 
-$queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-if ($queueJson === false || file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX) === false) {
-    log_send('QUEUE ERROR: could not persist queue item for ' . $service);
+// Remove legacy gateway credentials/destination from this queue item before any send.
+if (!persist_queue_item($service, $message, $idempotencyKey)) {
+    log_send('send-failure', 'Could not persist queue item before sending', ['service' => (string) $service]);
+    remove_queue_item($service);
     exit(1);
 }
 
@@ -100,22 +286,22 @@ $payload = [
     'to' => $GROUP_ID,
     'message' => $message,
     'ref_id' => 'uptime-' . $idempotencyKey,
-    'expires_in' => 3600
+    'expires_in' => 30
 ];
-
 $requestBody = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
 if ($requestBody === false) {
-    log_send('REQUEST ERROR: could not encode message for ' . $service);
+    log_send('send-failure', 'Could not encode queued message', ['service' => (string) $service]);
+    remove_queue_item($service);
     exit(1);
 }
 
-$responseHeaders = [];
-$ch = curl_init($SEND_URL);
-if ($ch === false) {
-    log_send('REQUEST ERROR: could not initialize cURL for ' . $service);
+$send = curl_init($SEND_URL);
+if ($send === false) {
+    log_send('send-failure', 'Could not initialize NgirimWA send request', ['service' => (string) $service]);
+    remove_queue_item($service);
     exit(1);
 }
-curl_setopt_array($ch, [
+curl_setopt_array($send, [
     CURLOPT_POST => true,
     CURLOPT_HTTPHEADER => [
         'x-api-key: ' . $API_KEY,
@@ -126,21 +312,13 @@ curl_setopt_array($ch, [
     CURLOPT_POSTFIELDS => $requestBody,
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_CONNECTTIMEOUT => 5,
-    CURLOPT_TIMEOUT => 20,
-    CURLOPT_HEADERFUNCTION => function ($curl, $headerLine) use (&$responseHeaders) {
-        $length = strlen($headerLine);
-        $parts = explode(':', $headerLine, 2);
-        if (count($parts) === 2) {
-            $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
-        }
-        return $length;
-    }
+    CURLOPT_TIMEOUT => 20
 ]);
 
-$response = curl_exec($ch);
-$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$error = curl_error($ch);
-curl_close($ch);
+$response = curl_exec($send);
+$httpCode = curl_getinfo($send, CURLINFO_HTTP_CODE);
+$error = curl_error($send);
+curl_close($send);
 
 $result = is_string($response) ? json_decode($response, true) : null;
 $accepted = $error === ''
@@ -150,7 +328,7 @@ $accepted = $error === ''
     && ($result['success'] ?? false) === true;
 
 if (!$accepted) {
-    $errorCode = is_array($result) ? ($result['details']['code'] ?? 'api_error') : 'invalid_response';
+    $errorCode = is_array($result) ? ($result['details']['code'] ?? null) : null;
     if ($httpCode === 401 || $httpCode === 403) {
         $authBlockJson = json_encode([
             'api_key_hash' => $apiKeyFingerprint,
@@ -159,58 +337,23 @@ if (!$accepted) {
         if ($authBlockJson !== false) {
             file_put_contents($AUTH_BLOCK_FILE, $authBlockJson, LOCK_EX);
         }
-        log_send('AUTH BLOCKED: NgirimWA returned HTTP ' . $httpCode . '; update the API key or subscription before retrying');
-        exit(1);
+        drop_queue('authentication_failed', ['http_code' => $httpCode]);
+    } else {
+        log_send('send-failure', 'NgirimWA did not accept the message; it will not be retried', [
+            'service' => (string) $service,
+            'http_code' => $httpCode,
+            'error_code' => $errorCode,
+            'curl_error' => $error
+        ]);
+        remove_queue_item($service);
     }
-
-    $retryable = $error !== ''
-        || in_array($httpCode, [408, 409, 429], true)
-        || $httpCode >= 500;
-    if ($retryable) {
-        $attempts = (int) ($item['attempts'] ?? 0) + 1;
-        $retryAfter = $responseHeaders['retry-after'] ?? '';
-        $delay = preg_match('/^\d+$/', $retryAfter) === 1
-            ? min(3600, max(1, (int) $retryAfter))
-            : min(3600, 30 * (2 ** min(7, $attempts - 1)));
-        $queue[$service]['attempts'] = $attempts;
-        $queue[$service]['next_attempt_at'] = time() + $delay;
-        $queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-        if ($queueJson !== false) {
-            file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX);
-        }
-        log_send('NGIRIMWA RETRY: service=' . $service . ' http=' . $httpCode . ' in=' . $delay . 's');
-        exit(1);
-    }
-
-    $queue[$service]['blocked_error'] = $errorCode;
-    $queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-    if ($queueJson !== false) {
-        file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX);
-    }
-    log_send('NGIRIMWA ERROR: service=' . $service . ' http=' . $httpCode . ' code=' . $errorCode . ' curl=' . $error);
-    exit(1);
-}
-
-$lastStatus = file_exists($STATUS_FILE)
-    ? json_decode(file_get_contents($STATUS_FILE), true)
-    : [];
-if (!is_array($lastStatus)) {
-    $lastStatus = [];
-}
-$lastStatus[$service] = $item['status'] ?? null;
-
-$statusJson = json_encode($lastStatus, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-if ($statusJson === false || file_put_contents($STATUS_FILE, $statusJson, LOCK_EX) === false) {
-    log_send('STATE ERROR: could not update last status for ' . $service);
-    exit(1);
-}
-
-unset($queue[$service]);
-$queueJson = json_encode($queue, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-if ($queueJson === false || file_put_contents($QUEUE_FILE, $queueJson, LOCK_EX) === false) {
-    log_send('QUEUE ERROR: could not remove sent item for ' . $service);
     exit(1);
 }
 
 $trackingId = $result['data']['tracking_id'] ?? 'unknown';
-log_send('NGIRIMWA ACCEPTED: service=' . $service . ' tracking_id=' . $trackingId);
+log_send('send-success', 'NgirimWA accepted the message', [
+    'service' => (string) $service,
+    'tracking_id' => $trackingId
+]);
+
+complete_queue_item($service, $item['status'] ?? null);

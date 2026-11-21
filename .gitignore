@@ -5,3 +5,4 @@
 /api/*.lock
 /api/last-status.json
 /api/queue.json
+/log/*.log

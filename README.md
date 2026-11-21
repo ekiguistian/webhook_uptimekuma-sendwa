@@ -14,6 +14,12 @@ project/
 │   ├── send-queue.php           # worker yang dijalankan cron
 │   ├── queue.json               # antrean runtime
 │   └── last-status.json         # status terakhir yang diterima NgirimWA
+├── log/                         # seluruh log aplikasi dan PHP
+│   ├── system.log
+│   ├── send-success.log
+│   ├── send-failure.log
+│   ├── php-error.log
+│   └── cron-run.log
 └── public/
     ├── index.php                # halaman informasi umum
     └── api/uptime.php           # pintu masuk HTTP menuju api/uptime.php
@@ -29,17 +35,23 @@ flowchart LR
   Core -->|Simpan perubahan status| Queue["api/queue.json"]
   Cron["Cron Linux / aaPanel"] --> Worker["api/send-queue.php"]
   Queue --> Worker
-  Worker -->|HTTPS, x-api-key| NgirimWA["NgirimWA API"]
-  NgirimWA --> Group["Grup WhatsApp"]
+  Worker -->|GET status, x-api-key| Status["NgirimWA /devices/status"]
+  Status -->|connected| Send["POST /messages/send"]
+  Status -->|gagal atau offline| Failure["hapus antrean + log gagal"]
+  Send -->|diterima| Group["Grup WhatsApp"]
+  Worker --> Logs["Folder log/"]
 ~~~
 
 1. Uptime Kuma mengirim JSON ke endpoint webhook.
 2. Pintu masuk publik meneruskan request ke handler yang berada di luar document root.
 3. Handler membaca konfigurasi dari .env, mengabaikan status yang sama atau sudah mengantre, lalu menyimpan pesan alert/recovery ke api/queue.json.
 4. Cron menjalankan worker. Setiap eksekusi memproses maksimal satu pesan yang siap dikirim.
-5. Worker mengirim pesan ke NgirimWA dengan header x-api-key dan ID grup sebagai tujuan. NgirimWA menerima pesan ke antreannya dan mengembalikan tracking ID.
+5. Sebelum mengirim, worker mengecek akses API dan status perangkat lewat GET /devices/status. Hanya status connected yang dilanjutkan ke POST /messages/send. NgirimWA mendokumentasikan endpoint dan nilai status ini di [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat).
+6. Jika pemeriksaan API/perangkat gagal, semua item yang sedang menunggu dihapus dan dicatat sebagai gagal. Jika satu pengiriman pesan gagal, item itu dihapus dan tidak dicoba ulang. Pesan gagal tidak akan terkirim otomatis ketika koneksi pulih.
 
-HTTP sukses dari NgirimWA berarti pesan diterima ke antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Worker mencatat tracking ID di api/send.log. Pelacakan status akhir belum dihubungkan.
+Worker mengatur expires_in ke 30 detik. Ini membatasi lama pesan berada di antrean internal NgirimWA jika perangkat terputus tepat setelah pemeriksaan status. Karena NgirimWA mengantrekan pesan yang diterima, kondisi putus yang terjadi di sela pemeriksaan dan request kirim masih dapat membuat pesan diterima oleh antrean provider; API pembatalan antrean provider tidak dipakai di integrasi ini. Lihat [panduan kirim pesan NgirimWA](https://panduan.ngirimwa.com/api/kirim-pesan).
+
+HTTP sukses dari NgirimWA berarti pesan diterima ke antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Worker mencatat tracking ID di log/send-success.log. Pelacakan status akhir belum dihubungkan.
 
 ## Fungsi public/index.php
 
@@ -67,7 +79,7 @@ UPTIME_STATUS_WEBSITE=https://status-server.nexan.id
 
 API key dibuat di Dashboard NgirimWA → Perangkat → Kunci API. ID grup biasanya berakhiran @g.us. Signature dan URL website di atas menjadi footer pesan dan dapat diubah tanpa mengedit PHP.
 
-.env dikecualikan dari Git; hanya .env.example yang dipush. Simpan .env di luar document root jika memungkinkan dan batasi izin baca ke akun PHP/cron. Root project harus dapat ditulis oleh akun worker karena file antrean, status, dan log dibuat di api/.
+.env dikecualikan dari Git; hanya .env.example yang dipush. Simpan .env dan api/ di luar document root. Akun PHP/cron perlu membaca .env dan menulis file antrean/status di api/ serta file log di log/. Batasi izin folder tersebut ke akun layanan; jangan gunakan permission 777.
 
 ## Deploy di Linux
 
@@ -77,17 +89,18 @@ Contoh struktur deployment:
 /var/www/webhook/
 ├── .env
 ├── api/
+├── log/
 └── public/
 ~~~
 
 Atur document root web server ke /var/www/webhook/public. URL /api/uptime.php dilayani oleh wrapper public/api/uptime.php, sedangkan worker cron tetap berada di luar document root.
 
-Pastikan PHP CLI dan ekstensi cURL tersedia. Salin .env.example menjadi .env, isi pengaturannya, lalu atur owner/permission agar PHP-FPM dan cron dapat membaca .env dan menulis file di api/. Jangan gunakan permission 777.
+Pastikan PHP CLI dan ekstensi cURL tersedia. Salin .env.example menjadi .env, isi pengaturannya, lalu atur owner/permission agar PHP-FPM dan cron dapat membaca .env dan menulis file di api/ serta log/. Jangan gunakan permission 777.
 
 Cari lokasi PHP CLI dengan command -v php dan lihat versinya dengan php -v. Buat cron setiap satu menit dengan crontab -e:
 
 ~~~cron
-* * * * * /usr/bin/php /var/www/webhook/api/send-queue.php >> /var/www/webhook/api/cron-run.log 2>&1
+* * * * * /usr/bin/php /var/www/webhook/api/send-queue.php >> /var/www/webhook/log/cron-run.log 2>&1
 ~~~
 
 Ganti /usr/bin/php dan /var/www/webhook dengan lokasi yang benar di server. Jalankan command worker sekali secara manual untuk memeriksa konfigurasi dan permission sebelum mengaktifkan cron.
@@ -101,16 +114,20 @@ Ganti /usr/bin/php dan /var/www/webhook dengan lokasi yang benar di server. Jala
 5. Buka menu Cron → Add Task → Shell Script. Beri nama, atur Execution cycle ke setiap 1 menit, lalu isi Script content dengan command berikut. Ganti path versi PHP dan direktori project sesuai server:
 
 ~~~bash
-/www/server/php/83/bin/php /www/wwwroot/webhook.nexan.id/api/send-queue.php
+/www/server/php/83/bin/php /www/wwwroot/webhook.nexan.id/api/send-queue.php >> /www/wwwroot/webhook.nexan.id/log/cron-run.log 2>&1
 ~~~
 
 6. Klik Execute satu kali, lalu periksa Log task. Setelah berhasil, aktifkan jadwalnya. Panduan resmi aaPanel menjelaskan bahwa Shell Script cron sebaiknya memakai path absolut dan environment cron dapat berbeda dari shell interaktif: [Cron aaPanel](https://www.aapanel.com/docs/Function/Cron.html).
 
-## Retry dan pemeriksaan
+## Log dan penanganan error
 
-- Error jaringan, HTTP 408/409/429, dan 5xx dicoba ulang dengan Retry-After atau jeda bertahap.
-- HTTP 401/403 menghentikan pengiriman berulang untuk API key yang sama. Perbaiki key atau langganan. Jika langganan diperbaiki tanpa mengganti key, hapus api/ngirimwa-auth.lock.
-- Error validasi lain tetap berada di antrean dengan field blocked_error untuk diperiksa sebelum dicoba ulang.
-- Periksa api/app.log untuk webhook, api/send.log untuk respons worker, api/queue.json untuk antrean, dan log task di aaPanel.
+- log/system.log berisi aktivitas umum aplikasi dan merangkum keberhasilan maupun kegagalan.
+- log/send-success.log mencatat pesan yang diterima NgirimWA, termasuk tracking ID.
+- log/send-failure.log mencatat pemeriksaan API/perangkat yang gagal dan pesan yang ditolak/gagal.
+- log/php-error.log menjadi tujuan warning/fatal error PHP. Detail error tidak ditampilkan ke browser; endpoint hanya memberi respons umum.
+- log/cron-run.log menampung output command cron Linux/aaPanel. Log task aaPanel juga dapat dilihat dari menu Cron → Log.
+- Folder log/ tidak masuk Git dan diblokir dari akses HTTP pada Apache. Pastikan PHP/cron bisa menulis ke folder ini.
+- API key 401/403 membuat pengiriman dihentikan untuk key tersebut. Perbaiki key/langganan; bila hanya langganan yang diperbaiki, hapus api/ngirimwa-auth.lock. Item yang sudah dinyatakan gagal tetap tidak dikirim ulang.
+- Log akses web server dan log panel aaPanel tetap mengikuti lokasi yang dikonfigurasi di server; folder log/ menampung log aplikasi, PHP, dan output cron proyek.
 
-Pada Nginx, .htaccess tidak berlaku. Karena itu document root harus tetap public agar .env dan api/ tidak bisa diakses langsung; tambahkan aturan deny dotfile di konfigurasi Nginx jika diperlukan.
+Atur display_errors=Off pada konfigurasi PHP aaPanel/server sebagai lapisan tambahan. Pada Nginx, .htaccess tidak berlaku; document root harus tetap public agar .env, api/, dan log/ tidak bisa diakses langsung, dan konfigurasi server perlu memakai halaman error umum untuk 4xx/5xx.

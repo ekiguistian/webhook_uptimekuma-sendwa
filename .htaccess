@@ -5,3 +5,8 @@
 <FilesMatch "^(queue\.json|last-status\.json|.*\.lock|.*\.log)$">
     Require all denied
 </FilesMatch>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^log(?:/|$) - [F,L]
+</IfModule>

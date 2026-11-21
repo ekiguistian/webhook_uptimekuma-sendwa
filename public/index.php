@@ -1,3 +1,6 @@
+<?php
+require_once dirname(__DIR__) . '/api/config.php';
+?>
 <!DOCTYPE html>
 <html lang="id">
 <head>

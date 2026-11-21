@@ -1,3 +1,11 @@
 <FilesMatch "^\.">
     Require all denied
 </FilesMatch>
+
+ErrorDocument 400 "Request could not be processed."
+ErrorDocument 403 "Access denied."
+ErrorDocument 404 "Not found."
+ErrorDocument 500 "Service temporarily unavailable."
+ErrorDocument 502 "Service temporarily unavailable."
+ErrorDocument 503 "Service temporarily unavailable."
+ErrorDocument 504 "Service temporarily unavailable."

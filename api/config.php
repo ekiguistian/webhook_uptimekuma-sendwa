@@ -53,4 +53,91 @@ function app_env($name, $default = '')
     return $value === false ? $default : trim($value);
 }
 
+function app_log_directory()
+{
+    return dirname(__DIR__) . '/log';
+}
+
+function configure_app_error_logging()
+{
+    ini_set('display_errors', '0');
+    ini_set('display_startup_errors', '0');
+    ini_set('log_errors', '1');
+    error_reporting(E_ALL);
+
+    $logDirectory = app_log_directory();
+    if (!is_dir($logDirectory)) {
+        @mkdir($logDirectory, 0750, true);
+    }
+    ini_set('error_log', $logDirectory . '/php-error.log');
+}
+
+function app_log($channel, $message, $context = [])
+{
+    $allowedChannels = ['system', 'send-success', 'send-failure'];
+    if (!in_array($channel, $allowedChannels, true)) {
+        $channel = 'system';
+    }
+
+    $logDirectory = app_log_directory();
+    if (!is_dir($logDirectory)) {
+        @mkdir($logDirectory, 0750, true);
+    }
+
+    $contextJson = $context
+        ? json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
+        : '';
+    $line = '[' . date('c') . '] ' . $message;
+    if ($contextJson !== false && $contextJson !== '') {
+        $line .= ' ' . $contextJson;
+    }
+    $line .= PHP_EOL;
+    $channels = $channel === 'system' ? ['system'] : [$channel, 'system'];
+    foreach ($channels as $logChannel) {
+        if (file_put_contents($logDirectory . '/' . $logChannel . '.log', $line, FILE_APPEND | LOCK_EX) === false) {
+            error_log('Application log write failed for channel ' . $logChannel);
+        }
+    }
+}
+
+function app_queue_lock()
+{
+    $lock = @fopen(dirname(__DIR__) . '/api/queue.lock', 'c');
+    if ($lock === false || !flock($lock, LOCK_EX)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        return false;
+    }
+    return $lock;
+}
+
+function app_queue_unlock($lock)
+{
+    if (is_resource($lock)) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+function app_read_json_array($path)
+{
+    if (!file_exists($path)) {
+        return [];
+    }
+    $contents = file_get_contents($path);
+    if ($contents === false) {
+        return null;
+    }
+    $decoded = json_decode($contents, true);
+    return is_array($decoded) ? $decoded : null;
+}
+
+function app_write_json_array($path, $data)
+{
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    return $json !== false && file_put_contents($path, $json, LOCK_EX) !== false;
+}
+
+configure_app_error_logging();
 load_env_file(dirname(__DIR__) . '/.env');
