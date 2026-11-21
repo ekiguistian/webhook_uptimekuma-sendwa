@@ -4,6 +4,8 @@ require_once __DIR__ . '/config.php';
 
 $NGIRIMWA_API_KEY  = app_env('NGIRIMWA_API_KEY');
 $NGIRIMWA_GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
+$MESSAGE_SIGNATURE = app_env('UPTIME_MESSAGE_SIGNATURE', 'Nexan Network Monitoring');
+$STATUS_WEBSITE    = app_env('UPTIME_STATUS_WEBSITE', 'https://status-server.nexan.id');
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -95,8 +97,8 @@ $text .= "Service : {$monitorName}\n";
 $text .= "Output  : {$target}\n";
 $text .= "Status  : {$status}\n";
 $text .= "Waktu   : {$time} WIB\n\n";
-$text .= "— Nexan Network Monitoring\n";
-$text .= "Website : https://status-server.nexan.id";
+$text .= "— {$MESSAGE_SIGNATURE}\n";
+$text .= "Website : {$STATUS_WEBSITE}";
 
 // queue
 $queue[$monitorName] = [

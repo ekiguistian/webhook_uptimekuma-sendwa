@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8">
-  <title>Webhook API Endpoint</title>
+  <title>Webhook Uptime Kuma | Nexan</title>
   <meta name="robots" content="noindex,nofollow">
   <style>
     body {
@@ -48,20 +48,32 @@
       font-size: 12px;
       color: #64748b;
     }
+    code {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: #0f172a;
+      color: #bae6fd;
+      overflow-wrap: anywhere;
+    }
   </style>
 </head>
 <body>
   <div class="box">
-    <h1>Webhook API Endpoint</h1>
+    <h1>Webhook Uptime Kuma</h1>
     <p>
-      Domain <strong>webhook.nexan.id</strong> digunakan khusus untuk
-      <strong>API Webhook Internal</strong>.
+      Domain <strong>webhook.nexan.id</strong> menyediakan endpoint webhook
+      untuk meneruskan notifikasi perubahan status dari Uptime Kuma ke WhatsApp.
     </p>
     <p>
-      Akses melalui browser tidak didukung.<br>
-      Endpoint ini hanya menerima request otomatis dari sistem.
+      Alamat yang dipasang di konfigurasi notifikasi Uptime Kuma:
+      <br><code>https://webhook.nexan.id/api/uptime.php</code>
     </p>
-    <div class="badge">API ONLY · NO PUBLIC ACCESS</div>
+    <p>
+      Halaman ini hanya informasi umum. Membukanya di browser tidak mengirim
+      pesan dan tidak memeriksa jadwal cron atau koneksi WhatsApp.
+    </p>
+    <div class="badge">UPTIME KUMA WEBHOOK · INFO</div>
     <div class="footer">
       © Nexan Network Monitoring · System Endpoint
     </div>
