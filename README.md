@@ -31,7 +31,7 @@ flowchart LR
   Worker --> Logs["Folder log/"]
 ~~~
 
-Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Jika pemeriksaan API atau perangkat gagal, pesan yang menunggu dihapus dan dicatat sebagai gagal; pesan tersebut tidak dicoba ulang otomatis.
+Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Pemeriksaan API mengulang sekali jika terjadi error transport seperti DNS atau jaringan sesaat. Jika pemeriksaan kedua tetap gagal atau perangkat tidak terhubung, pesan yang menunggu dihapus dan dicatat sebagai gagal; pesan tersebut tidak dicoba ulang pada eksekusi cron berikutnya.
 
 Worker mengatur `expires_in` menjadi 30 detik untuk membatasi masa tunggu pesan pada antrean NgirimWA. Respons sukses API menunjukkan pesan diterima oleh antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Detail endpoint tersedia di [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat) dan [panduan kirim pesan](https://panduan.ngirimwa.com/api/kirim-pesan).
 

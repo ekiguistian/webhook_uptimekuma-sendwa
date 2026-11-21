@@ -210,34 +210,61 @@ if (file_exists($AUTH_BLOCK_FILE)) {
 }
 
 // Check both API reachability/authentication and the WhatsApp device state first.
-$check = curl_init($DEVICE_STATUS_URL);
-if ($check === false) {
-    drop_queue('device_check_unavailable');
-    exit(1);
+$checkResponse = false;
+$checkHttpCode = 0;
+$checkError = '';
+$checkResult = null;
+$deviceStatus = null;
+
+// A short transport retry handles temporary DNS/network errors without keeping
+// the queued message for a later cron run if the API/device remains unavailable.
+for ($attempt = 1; $attempt <= 2; $attempt++) {
+    $checkResponse = false;
+    $checkHttpCode = 0;
+    $checkError = '';
+    $checkResult = null;
+
+    $check = curl_init($DEVICE_STATUS_URL);
+    if ($check === false) {
+        $checkError = 'Could not initialize the API/device check request';
+    } else {
+        curl_setopt_array($check, [
+            CURLOPT_HTTPGET => true,
+            CURLOPT_HTTPHEADER => [
+                'x-api-key: ' . $API_KEY,
+                'Accept: application/json'
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 20
+        ]);
+
+        $checkResponse = curl_exec($check);
+        $checkHttpCode = curl_getinfo($check, CURLINFO_HTTP_CODE);
+        $checkError = curl_error($check);
+        curl_close($check);
+    }
+
+    $checkResult = is_string($checkResponse) ? json_decode($checkResponse, true) : null;
+    $deviceStatus = is_array($checkResult) ? ($checkResult['data']['status'] ?? null) : null;
+    $apiAvailable = $checkError === ''
+        && $checkHttpCode >= 200
+        && $checkHttpCode < 300
+        && is_array($checkResult)
+        && ($checkResult['success'] ?? false) === true;
+
+    if ($apiAvailable || $checkError === '' || $attempt === 2) {
+        break;
+    }
+
+    log_send('cron-run', 'API/device check transport failed; retrying once', [
+        'attempt' => $attempt,
+        'curl_error' => $checkError
+    ]);
+    sleep(1);
 }
-curl_setopt_array($check, [
-    CURLOPT_HTTPGET => true,
-    CURLOPT_HTTPHEADER => [
-        'x-api-key: ' . $API_KEY,
-        'Accept: application/json'
-    ],
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_CONNECTTIMEOUT => 5,
-    CURLOPT_TIMEOUT => 10
-]);
 
-$checkResponse = curl_exec($check);
-$checkHttpCode = curl_getinfo($check, CURLINFO_HTTP_CODE);
-$checkError = curl_error($check);
-curl_close($check);
-
-$checkResult = is_string($checkResponse) ? json_decode($checkResponse, true) : null;
 $deviceStatus = is_array($checkResult) ? ($checkResult['data']['status'] ?? null) : null;
-$apiAvailable = $checkError === ''
-    && $checkHttpCode >= 200
-    && $checkHttpCode < 300
-    && is_array($checkResult)
-    && ($checkResult['success'] ?? false) === true;
 $deviceReady = $apiAvailable && $deviceStatus === 'connected';
 
 if (!$deviceReady) {
@@ -319,7 +346,7 @@ curl_setopt_array($send, [
     ],
     CURLOPT_POSTFIELDS => $requestBody,
     CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_CONNECTTIMEOUT => 5,
+    CURLOPT_CONNECTTIMEOUT => 10,
     CURLOPT_TIMEOUT => 20
 ]);
 
