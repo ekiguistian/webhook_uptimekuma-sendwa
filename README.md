@@ -10,6 +10,7 @@ Aplikasi PHP ini menerima perubahan status monitor dari Uptime Kuma dan mengirim
 - Memeriksa koneksi API serta status perangkat NgirimWA sebelum mengirim.
 - Menulis log aplikasi, hasil pengiriman, dan error PHP ke folder `log/`.
 - Menyediakan halaman untuk melihat URL webhook sesuai domain serta membuat dan menyalin token.
+- Menampilkan live monitor koneksi DNS, NgirimWA, Uptime Kuma, status konfigurasi, serta jumlah pesan berhasil dan gagal.
 
 ## Alur sistem
 
@@ -29,9 +30,14 @@ flowchart LR
   Status -->|gagal/offline| Failure["hapus antrean + log gagal"]
   Send --> Group["Grup WhatsApp"]
   Worker --> Logs["Folder log/"]
+  MonitorCron["Cron live monitor"] --> MonitorWorker["api/live-monitor.php"]
+  MonitorWorker --> Checks["DNS 1.1.1.1 + NgirimWA + Uptime Kuma"]
+  Checks --> Snapshot["log/live-monitor.json"]
+  Browser["Halaman public"] -->|poll 5 detik| MonitorStatus["public/api/live-status.php"]
+  MonitorStatus --> Snapshot
 ~~~
 
-Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Pemeriksaan API mengulang sekali jika terjadi error transport seperti DNS atau jaringan sesaat. Jika pemeriksaan kedua tetap gagal atau perangkat tidak terhubung, pesan yang menunggu dihapus dan dicatat sebagai gagal; pesan tersebut tidak dicoba ulang pada eksekusi cron berikutnya.
+Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Resolusi DNS dan koneksi API diukur terpisah; lookup DNS yang tidak menghasilkan alamat dan error koneksi API masing-masing dicoba ulang sekali. Jika pemeriksaan akhir tetap gagal atau perangkat tidak terhubung, pesan yang menunggu dihapus dan dicatat sebagai gagal; pesan tersebut tidak dicoba ulang pada eksekusi cron berikutnya.
 
 Worker mengatur `expires_in` menjadi 30 detik untuk membatasi masa tunggu pesan pada antrean NgirimWA. Respons sukses API menunjukkan pesan diterima oleh antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Detail endpoint tersedia di [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat) dan [panduan kirim pesan](https://panduan.ngirimwa.com/api/kirim-pesan).
 
@@ -45,16 +51,22 @@ project/
 │   ├── config.php               # pemuatan .env dan fungsi log
 │   ├── uptime.php               # handler webhook dan pembuatan antrean
 │   ├── send-queue.php           # worker cron
+│   ├── live-monitor.php         # pemeriksaan live monitor tiap 5 detik
+│   ├── live-status.php          # respons status publik yang disanitasi
 │   ├── queue.json               # antrean runtime
 │   └── last-status.json         # status monitor terakhir
 ├── log/                         # log aplikasi, PHP, dan cron
 └── public/                      # document root web server
     ├── index.php                # halaman utama dan generator token
     ├── .htaccess                # URL rewrite untuk Apache
-    └── api/uptime.php           # wrapper publik menuju handler
+    └── api/                      # wrapper publik menuju handler internal
+        ├── uptime.php
+        └── live-status.php
 ~~~
 
 Document root diarahkan ke `public/`. Dengan susunan ini, `.env`, `api/`, dan `log/` tidak menjadi file publik. PHP-FPM memerlukan akses baca ke `.env` dan akses tulis ke file antrean/status serta log; cron worker memerlukan akses yang sama.
+
+Halaman utama juga menampilkan live monitor. Browser membaca snapshot yang disiapkan worker; request halaman tidak memanggil API NgirimWA atau Uptime Kuma secara langsung. Snapshot dan penghitung pesan berada di `log/`, sedangkan endpoint publik hanya mengirim waktu, status koneksi, jumlah pesan, dan indikator apakah konfigurasi sudah terisi. Nilai API key, token, group ID, dan URL Uptime Kuma tidak dikirim ke browser.
 
 ## URL webhook dan rewrite
 
@@ -96,14 +108,15 @@ NGIRIMWA_GROUP_ID=
 NGIRIMWA_BASE_URL=https://dash.ngirimwa.com/api/v1
 UPTIME_MESSAGE_SIGNATURE=Server Monitoring
 UPTIME_STATUS_WEBSITE=https://status.example.com
+UPTIME_KUMA_URL=
 UPTIME_WEBHOOK_TOKEN=
 ~~~
 
-`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Signature dan URL status digunakan sebagai footer notifikasi. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
+`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. `UPTIME_KUMA_URL` adalah URL instance Uptime Kuma yang akan diperiksa live monitor. Signature dan `UPTIME_STATUS_WEBSITE` digunakan sebagai footer notifikasi. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
 
-## Cron worker
+## Cron worker dan live monitor
 
-`api/send-queue.php` memeriksa perangkat dan memproses antrean. Jadwal satu menit umum digunakan agar pesan yang menunggu segera diproses. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
+`api/send-queue.php` memeriksa perangkat dan memproses antrean. `api/live-monitor.php --loop` memeriksa DNS 1.1.1.1, endpoint NgirimWA, dan URL Uptime Kuma setiap lima detik, lalu menyimpan snapshot untuk halaman utama. Pemeriksaan DNS 1.1.1.1 berupa kueri DNS melalui UDP, bukan ICMP echo. Cron standar hanya memulai task per menit; opsi `--loop` menjalankan 12 pemeriksaan dengan jarak lima detik dalam satu proses. Lock worker mencegah proses monitor berjalan tumpang tindih. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
 
 ### Linux cron
 
@@ -111,6 +124,7 @@ Cron Linux biasanya menggunakan PHP CLI dari sistem. Contoh entry `crontab`:
 
 ~~~cron
 * * * * * /usr/bin/php /var/www/webhook/api/send-queue.php >> /var/www/webhook/log/cron-run.log 2>&1
+* * * * * /usr/bin/php /var/www/webhook/api/live-monitor.php --loop >> /var/www/webhook/log/cron-run.log 2>&1
 ~~~
 
 `/usr/bin/php` dan `/var/www/webhook` pada contoh tersebut mewakili lokasi binary PHP dan project di server.
@@ -133,9 +147,10 @@ aaPanel menamai direktori berdasarkan nomor versi tanpa titik. Contohnya, PHP 8.
 
 ~~~bash
 /www/server/php/84/bin/php /www/wwwroot/your-domain/api/send-queue.php >> /www/wwwroot/your-domain/log/cron-run.log 2>&1
+/www/server/php/84/bin/php /www/wwwroot/your-domain/api/live-monitor.php --loop >> /www/wwwroot/your-domain/log/cron-run.log 2>&1
 ~~~
 
-Versi yang dipilih untuk website terlihat pada pengaturan PHP website di aaPanel. Versi default untuk perintah shell dapat dilihat pada **Advanced Setup → PHP CLI**; hasil `php -v` menunjukkan binary default shell, sedangkan path `/www/server/php/84/bin/php -v` memeriksa binary PHP 8.4 secara langsung. Direktori dapat berbeda menurut versi yang terpasang. Task cron dijalankan melalui **Cron → Add Task → Shell Script** dengan interval satu menit. Referensi aaPanel: [pengaturan website dan versi PHP](https://www.aapanel.com/docs/Function/php.html), [struktur dan perintah PHP](https://www.aapanel.com/docs/faq/Service_Manage_Commands.html), dan [cron](https://www.aapanel.com/docs/Function/Cron.html).
+Buat dua task terpisah di crontab atau aaPanel, keduanya dengan interval satu menit: satu untuk `send-queue.php`, satu untuk `live-monitor.php --loop`. Pada aaPanel, gunakan **Cron → Add Task → Shell Script**. Versi yang dipilih untuk website terlihat pada pengaturan PHP website di aaPanel. Versi default untuk perintah shell dapat dilihat pada **Advanced Setup → PHP CLI**; hasil `php -v` menunjukkan binary default shell, sedangkan path `/www/server/php/84/bin/php -v` memeriksa binary PHP 8.4 secara langsung. Direktori dapat berbeda menurut versi yang terpasang. Referensi aaPanel: [pengaturan website dan versi PHP](https://www.aapanel.com/docs/Function/php.html), [struktur dan perintah PHP](https://www.aapanel.com/docs/faq/Service_Manage_Commands.html), dan [cron](https://www.aapanel.com/docs/Function/Cron.html).
 
 ## Log dan operasi
 
@@ -143,7 +158,8 @@ Versi yang dipilih untuk website terlihat pada pengaturan PHP website di aaPanel
 - `log/send-success.log` mencatat pesan yang diterima NgirimWA, termasuk tracking ID.
 - `log/send-failure.log` mencatat pemeriksaan API/perangkat dan pesan yang gagal.
 - `log/php-error.log` menampung warning serta fatal error PHP; detail error tidak ditampilkan di browser.
-- `log/cron-run.log` mencatat pemanggilan worker, antrean kosong, dan hasil proses pesan. Redirect stdout/stderr pada command cron menjadi tambahan untuk output CLI yang tidak tertangani aplikasi.
+- `log/cron-run.log` mencatat pemanggilan worker, antrean kosong, hasil proses, serta waktu DNS, koneksi TCP, dan handshake TLS dalam milidetik. Resolusi DNS diukur terpisah dari koneksi API. Redirect stdout/stderr pada command cron menjadi tambahan untuk output CLI yang tidak tertangani aplikasi.
+- `log/live-monitor.json` menyimpan snapshot jaringan terakhir, sedangkan `log/delivery-metrics.json` menyimpan jumlah pesan berhasil/gagal. Keduanya merupakan file runtime dan tidak dilacak Git atau disajikan langsung oleh web server.
 - Penolakan token dicatat tanpa menyimpan nilai token atau isi payload.
 - Folder `log/` tidak dilacak Git dan diblokir dari akses HTTP pada Apache. Rotasi log mengikuti kebijakan server.
 

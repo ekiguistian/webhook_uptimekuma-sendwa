@@ -58,6 +58,85 @@ function app_log_directory()
     return dirname(__DIR__) . '/log';
 }
 
+function app_count_delivery_log_entries($path)
+{
+    if (!is_readable($path)) {
+        return 0;
+    }
+
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return 0;
+    }
+
+    $count = 0;
+    while (($line = fgets($handle)) !== false) {
+        $contextStart = strpos($line, ' {');
+        if ($contextStart === false) {
+            continue;
+        }
+
+        $context = json_decode(trim(substr($line, $contextStart + 1)), true);
+        if (is_array($context) && array_key_exists('service', $context)) {
+            $count++;
+        }
+    }
+    fclose($handle);
+
+    return $count;
+}
+
+function app_delivery_metrics($incrementChannel = null, $context = [])
+{
+    $logDirectory = app_log_directory();
+    if (!is_dir($logDirectory)) {
+        @mkdir($logDirectory, 0750, true);
+    }
+
+    $metricsPath = $logDirectory . '/delivery-metrics.json';
+    $lock = @fopen($logDirectory . '/delivery-metrics.lock', 'c');
+    if ($lock === false || !flock($lock, LOCK_EX)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        $metrics = app_read_json_array($metricsPath);
+        return is_array($metrics) ? $metrics : ['success' => 0, 'failure' => 0];
+    }
+
+    $metrics = app_read_json_array($metricsPath);
+    $initialized = is_array($metrics);
+    if (!$initialized) {
+        $metrics = [
+            'success' => app_count_delivery_log_entries($logDirectory . '/send-success.log'),
+            'failure' => app_count_delivery_log_entries($logDirectory . '/send-failure.log')
+        ];
+    }
+
+    $incremented = false;
+    if (isset($context['service']) && $context['service'] !== '') {
+        if ($incrementChannel === 'send-success') {
+            $metrics['success'] = (int) ($metrics['success'] ?? 0) + 1;
+            $incremented = true;
+        } elseif ($incrementChannel === 'send-failure') {
+            $metrics['failure'] = (int) ($metrics['failure'] ?? 0) + 1;
+            $incremented = true;
+        }
+    }
+
+    if ($incremented) {
+        $metrics['updated_at'] = date('c');
+    }
+    if (!$initialized || $incremented) {
+        if (!app_write_json_array($metricsPath, $metrics)) {
+            error_log('Could not write delivery metrics');
+        }
+    }
+
+    flock($lock, LOCK_UN);
+    fclose($lock);
+    return $metrics;
+}
+
 function configure_app_error_logging()
 {
     ini_set('display_errors', '0');
@@ -77,6 +156,10 @@ function app_log($channel, $message, $context = [])
     $allowedChannels = ['system', 'send-success', 'send-failure', 'cron-run'];
     if (!in_array($channel, $allowedChannels, true)) {
         $channel = 'system';
+    }
+
+    if (in_array($channel, ['send-success', 'send-failure'], true)) {
+        app_delivery_metrics($channel, $context);
     }
 
     $logDirectory = app_log_directory();

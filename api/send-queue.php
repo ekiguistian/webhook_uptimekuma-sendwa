@@ -28,6 +28,83 @@ function log_send($channel, $message, $context = [])
     }
 }
 
+function resolve_api_curl_mapping($url)
+{
+    $parts = parse_url($url);
+    $host = is_array($parts) ? strtolower((string) ($parts['host'] ?? '')) : '';
+    $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? 'https')) : 'https';
+    $port = is_array($parts) ? (int) ($parts['port'] ?? ($scheme === 'https' ? 443 : 80)) : 443;
+
+    $resolution = [
+        'host' => $host,
+        'mapping' => [],
+        'dns_lookup_ms' => 0.0,
+        'error' => null
+    ];
+
+    if ($host === '') {
+        $resolution['error'] = 'Invalid NgirimWA API base URL';
+        return $resolution;
+    }
+
+    if (filter_var(trim($host, '[]'), FILTER_VALIDATE_IP)) {
+        return $resolution;
+    }
+
+    $totalLookupMs = 0.0;
+    for ($attempt = 1; $attempt <= 2; $attempt++) {
+        $startedAt = microtime(true);
+        $records = dns_get_record($host, DNS_A | DNS_AAAA);
+        $totalLookupMs += (microtime(true) - $startedAt) * 1000;
+        $resolution['dns_lookup_ms'] = round($totalLookupMs, 3);
+
+        $addresses = [];
+        if (is_array($records)) {
+            foreach ($records as $record) {
+                if (($record['type'] ?? '') === 'A' && filter_var($record['ip'] ?? '', FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                    $addresses[] = $record['ip'];
+                } elseif (($record['type'] ?? '') === 'AAAA' && filter_var($record['ipv6'] ?? '', FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                    $addresses[] = '[' . $record['ipv6'] . ']';
+                }
+            }
+        }
+        $addresses = array_values(array_unique($addresses));
+
+        if ($addresses !== []) {
+            $resolution['mapping'] = [$host . ':' . $port . ':' . implode(',', $addresses)];
+            return $resolution;
+        }
+
+        $resolution['error'] = 'No A or AAAA records returned for the NgirimWA API host';
+        if ($attempt < 2) {
+            log_send('cron-run', 'NgirimWA DNS lookup returned no address; retrying once', [
+                'api_host' => $host,
+                'attempt' => $attempt,
+                'dns_lookup_ms' => $resolution['dns_lookup_ms']
+            ]);
+            sleep(1);
+        }
+    }
+
+    return $resolution;
+}
+
+function curl_connection_timing_context($handle, $dnsLookupMs)
+{
+    $curlNameLookupMs = (float) curl_getinfo($handle, CURLINFO_NAMELOOKUP_TIME) * 1000;
+    $tcpConnectMs = (float) curl_getinfo($handle, CURLINFO_CONNECT_TIME) * 1000;
+    $tlsConnectMs = (float) curl_getinfo($handle, CURLINFO_APPCONNECT_TIME) * 1000;
+    $apiReadyMs = $tlsConnectMs > 0 ? $tlsConnectMs : $tcpConnectMs;
+
+    return [
+        'dns_lookup_ms' => round((float) $dnsLookupMs, 3),
+        'curl_name_lookup_ms' => round($curlNameLookupMs, 3),
+        'tcp_connect_ms' => round(max(0, $tcpConnectMs - $curlNameLookupMs), 3),
+        'tls_handshake_ms' => round(max(0, $tlsConnectMs - $tcpConnectMs), 3),
+        'api_connect_ms' => round(max(0, $apiReadyMs - $curlNameLookupMs), 3)
+    ];
+}
+
 function drop_queue($reason, $context = [])
 {
     global $QUEUE_FILE;
@@ -209,14 +286,26 @@ if (file_exists($AUTH_BLOCK_FILE)) {
     unlink($AUTH_BLOCK_FILE);
 }
 
-// Check both API reachability/authentication and the WhatsApp device state first.
+$apiResolution = resolve_api_curl_mapping($DEVICE_STATUS_URL);
+if ($apiResolution['error'] !== null) {
+    drop_queue('api_dns_resolution_failed', [
+        'api_host' => $apiResolution['host'],
+        'dns_lookup_ms' => $apiResolution['dns_lookup_ms'],
+        'dns_error' => $apiResolution['error']
+    ]);
+    exit(1);
+}
+
+// Resolve the API host separately so the connection timeout only covers the
+// TCP/TLS connection. The original hostname remains in the URL for HTTPS/SNI.
 $checkResponse = false;
 $checkHttpCode = 0;
 $checkError = '';
 $checkResult = null;
 $deviceStatus = null;
+$checkTimingContext = ['dns_lookup_ms' => $apiResolution['dns_lookup_ms']];
 
-// A short transport retry handles temporary DNS/network errors without keeping
+// A short transport retry handles temporary connection errors without keeping
 // the queued message for a later cron run if the API/device remains unavailable.
 for ($attempt = 1; $attempt <= 2; $attempt++) {
     $checkResponse = false;
@@ -228,7 +317,7 @@ for ($attempt = 1; $attempt <= 2; $attempt++) {
     if ($check === false) {
         $checkError = 'Could not initialize the API/device check request';
     } else {
-        curl_setopt_array($check, [
+        $checkOptions = [
             CURLOPT_HTTPGET => true,
             CURLOPT_HTTPHEADER => [
                 'x-api-key: ' . $API_KEY,
@@ -237,11 +326,16 @@ for ($attempt = 1; $attempt <= 2; $attempt++) {
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_TIMEOUT => 20
-        ]);
+        ];
+        if ($apiResolution['mapping'] !== []) {
+            $checkOptions[CURLOPT_RESOLVE] = $apiResolution['mapping'];
+        }
+        curl_setopt_array($check, $checkOptions);
 
         $checkResponse = curl_exec($check);
         $checkHttpCode = curl_getinfo($check, CURLINFO_HTTP_CODE);
         $checkError = curl_error($check);
+        $checkTimingContext = curl_connection_timing_context($check, $apiResolution['dns_lookup_ms']);
         curl_close($check);
     }
 
@@ -260,7 +354,7 @@ for ($attempt = 1; $attempt <= 2; $attempt++) {
     log_send('cron-run', 'API/device check transport failed; retrying once', [
         'attempt' => $attempt,
         'curl_error' => $checkError
-    ]);
+    ] + $checkTimingContext);
     sleep(1);
 }
 
@@ -284,9 +378,14 @@ if (!$deviceReady) {
         'device_status' => $deviceStatus,
         'error_code' => $errorCode,
         'curl_error' => $checkError
-    ]);
+    ] + $checkTimingContext);
     exit(1);
 }
+
+log_send('cron-run', 'NgirimWA API/device check passed', [
+    'http_code' => $checkHttpCode,
+    'device_status' => $deviceStatus
+] + $checkTimingContext);
 
 // FIFO: at most one message is sent per cron execution.
 uasort($queue, function ($a, $b) {
@@ -336,7 +435,7 @@ if ($send === false) {
     remove_queue_item($service);
     exit(1);
 }
-curl_setopt_array($send, [
+$sendOptions = [
     CURLOPT_POST => true,
     CURLOPT_HTTPHEADER => [
         'x-api-key: ' . $API_KEY,
@@ -348,11 +447,16 @@ curl_setopt_array($send, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_CONNECTTIMEOUT => 10,
     CURLOPT_TIMEOUT => 20
-]);
+];
+if ($apiResolution['mapping'] !== []) {
+    $sendOptions[CURLOPT_RESOLVE] = $apiResolution['mapping'];
+}
+curl_setopt_array($send, $sendOptions);
 
 $response = curl_exec($send);
 $httpCode = curl_getinfo($send, CURLINFO_HTTP_CODE);
 $error = curl_error($send);
+$sendTimingContext = curl_connection_timing_context($send, $apiResolution['dns_lookup_ms']);
 curl_close($send);
 
 $result = is_string($response) ? json_decode($response, true) : null;
@@ -379,7 +483,7 @@ if (!$accepted) {
             'http_code' => $httpCode,
             'error_code' => $errorCode,
             'curl_error' => $error
-        ]);
+        ] + $sendTimingContext);
         remove_queue_item($service);
     }
     exit(1);
@@ -389,7 +493,7 @@ $trackingId = $result['data']['tracking_id'] ?? 'unknown';
 log_send('send-success', 'NgirimWA accepted the message', [
     'service' => (string) $service,
     'tracking_id' => $trackingId
-]);
+] + $sendTimingContext);
 
 complete_queue_item($service, $item['status'] ?? null);
 log_send('cron-run', 'Worker completed: queued message processed', [
