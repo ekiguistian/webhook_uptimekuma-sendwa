@@ -49,10 +49,25 @@ $sanitizeCheck = static function ($check, $defaultConfigured = true) {
     ];
 };
 
+$dnsSnapshot = is_array($snapshot['dns'] ?? null) ? $snapshot['dns'] : [];
+$dnsCheck = $sanitizeCheck($dnsSnapshot);
+$dnsCheck['resolvers'] = [];
+foreach (($dnsSnapshot['resolvers'] ?? []) as $resolver) {
+    if (!is_array($resolver)) {
+        continue;
+    }
+    $dnsCheck['resolvers'][] = [
+        'label' => is_string($resolver['label'] ?? null) ? substr($resolver['label'], 0, 80) : 'Resolver',
+        'ok' => is_bool($resolver['ok'] ?? null) ? $resolver['ok'] : null,
+        'ms' => is_numeric($resolver['ms'] ?? null) ? round((float) $resolver['ms'], 2) : null
+    ];
+}
+
 $response = [
     'checked_at' => is_string($snapshot['checked_at'] ?? null) ? $snapshot['checked_at'] : null,
+    'domain_checked_at' => is_string($snapshot['domain_checked_at'] ?? null) ? $snapshot['domain_checked_at'] : null,
     'checks' => [
-        'dns' => $sanitizeCheck($snapshot['dns'] ?? null),
+        'dns' => $dnsCheck,
         'ngirimwa' => $sanitizeCheck($snapshot['ngirimwa'] ?? null),
         'uptime_kuma' => $sanitizeCheck($snapshot['uptime_kuma'] ?? null, $uptimeKumaUrlConfigured)
     ],
@@ -62,7 +77,6 @@ $response = [
     ],
     'configuration' => [
         'ngirimwa_api_url' => app_env('NGIRIMWA_BASE_URL') !== '',
-        'ngirimwa_api_url_default' => app_env('NGIRIMWA_BASE_URL') === '',
         'api_key' => app_env('NGIRIMWA_API_KEY') !== '',
         'webhook_token' => app_env('UPTIME_WEBHOOK_TOKEN') !== '',
         'group_id' => app_env('NGIRIMWA_GROUP_ID') !== '',

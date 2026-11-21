@@ -27,17 +27,21 @@ flowchart LR
   Queue --> Worker
   Worker -->|GET status| Status["NgirimWA /devices/status"]
   Status -->|connected| Send["POST /messages/send"]
-  Status -->|gagal/offline| Failure["hapus antrean + log gagal"]
+  Status -->|gagal/offline| Wait["tahan antrean; coba lagi pada cron berikutnya"]
+  Wait -->|siap dalam 10 menit| Worker
+  Wait -->|lebih dari 10 menit| Failure["hapus antrean + log gagal"]
   Send --> Group["Grup WhatsApp"]
   Worker --> Logs["Folder log/"]
   MonitorCron["Cron live monitor"] --> MonitorWorker["api/live-monitor.php"]
-  MonitorWorker --> Checks["DNS 1.1.1.1 + NgirimWA + Uptime Kuma"]
+  MonitorWorker --> Checks["Resolver DNS server + ICMP ping domain"]
   Checks --> Snapshot["api/live-monitor.json"]
   Browser["Halaman public"] -->|poll 5 detik| MonitorStatus["public/api/live-status.php"]
   MonitorStatus --> Snapshot
 ~~~
 
-Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Resolusi DNS dan koneksi API diukur terpisah; lookup DNS yang tidak menghasilkan alamat dan error koneksi API masing-masing dicoba ulang sekali. Jika pemeriksaan akhir tetap gagal atau perangkat tidak terhubung, pesan yang menunggu dihapus dan dicatat sebagai gagal; pesan tersebut tidak dicoba ulang pada eksekusi cron berikutnya.
+Webhook hanya menerima request `POST` dengan token yang cocok. Status yang sama atau sudah berada di antrean dilewati. Cron worker memproses maksimal satu pesan per eksekusi. Jika konfigurasi pengiriman belum lengkap, API tidak dapat dihubungi, atau perangkat NgirimWA belum aktif, pesan tetap berada di antrean dan dicoba kembali oleh cron. Jika kondisi tertahan berlangsung lebih dari 10 menit, pesan dihapus dari antrean dan dicatat sebagai gagal. Pesan baru dapat masuk antrean selama URL API, API key, atau group ID belum diatur, tetapi token webhook tetap wajib agar request dapat diautentikasi.
+
+Status UP/DOWN yang sama dilewati selama 10 menit sejak pesan terakhir diterima API NgirimWA. Setelah jeda tersebut, status yang tetap sama dapat menghasilkan notifikasi berkala jika belum ada pesan monitor yang masih di antrean. Pesan uji Uptime Kuma mendapat nama dan status angka acak 10 digit agar tidak tertahan oleh deduplikasi status normal.
 
 Worker mengatur `expires_in` menjadi 30 detik untuk membatasi masa tunggu pesan pada antrean NgirimWA. Respons sukses API menunjukkan pesan diterima oleh antrean layanan, bukan bukti pesan sudah sampai atau dibaca. Detail endpoint tersedia di [panduan status perangkat](https://panduan.ngirimwa.com/api/kelola-perangkat) dan [panduan kirim pesan](https://panduan.ngirimwa.com/api/kirim-pesan).
 
@@ -112,11 +116,13 @@ UPTIME_STATUS_WEBSITE=https://status.example.com
 UPTIME_WEBHOOK_TOKEN=
 ~~~
 
-`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Live monitor memakai `UPTIME_STATUS_WEBSITE` sebagai target koneksi sekaligus footer notifikasi; tidak diperlukan variabel URL tambahan. Halaman menandai apakah `NGIRIMWA_BASE_URL` diatur secara eksplisit. Jika kosong, aplikasi tetap memakai endpoint default NgirimWA dan monitor menampilkan bahwa default sedang aktif. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
+`NGIRIMWA_API_KEY` berasal dari Dashboard NgirimWA → Perangkat → Kunci API. `NGIRIMWA_GROUP_ID` menentukan grup WhatsApp tujuan. Live monitor memakai host pada `NGIRIMWA_BASE_URL` dan `UPTIME_STATUS_WEBSITE` untuk probe ICMP. `NGIRIMWA_BASE_URL` harus diisi agar worker dapat mengirim; konfigurasi yang belum lengkap ditampilkan di monitor dan pesan yang sudah masuk antrean menunggu hingga 10 menit. File `.env` bersifat lokal dan tidak dilacak Git; `.env.example` merupakan template publik.
 
 ## Cron worker dan live monitor
 
-`api/send-queue.php` memeriksa perangkat dan memproses antrean. `api/live-monitor.php --loop` memeriksa DNS 1.1.1.1, endpoint NgirimWA, dan URL Uptime Kuma setiap lima detik, lalu menyimpan snapshot untuk halaman utama. Pemeriksaan DNS 1.1.1.1 berupa kueri DNS melalui UDP, bukan ICMP echo. Cron standar hanya memulai task per menit; opsi `--loop` menjalankan 12 pemeriksaan dengan jarak lima detik dalam satu proses. Lock worker mencegah proses monitor berjalan tumpang tindih. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
+`api/send-queue.php` memeriksa kesiapan konfigurasi, status API/perangkat, lalu memproses antrean. Pesan menunggu ketika `NGIRIMWA_BASE_URL`, API key, group ID, atau token webhook belum tersedia, maupun ketika API/perangkat gagal dihubungi. Jika kondisi tertahan berlangsung lebih dari 10 menit berturut-turut, pesan dicatat sebagai gagal dan dihapus dari antrean.
+
+`api/live-monitor.php --loop` memperbarui snapshot setiap lima detik. Probe DNS menggunakan kueri UDP ke satu atau beberapa resolver yang terdeteksi dari konfigurasi DNS server. Pemeriksaan domain NgirimWA dan `UPTIME_STATUS_WEBSITE` menggunakan ICMP echo ping (perintah `ping`), bukan HTTP/HTTPS, dan dijalankan maksimal sekali per menit; interval tersebut dikendalikan oleh worker. Cron standar hanya memulai task per menit, sedangkan `--loop` menjalankan 12 snapshot dalam satu proses. Karena itu, jadwalkan perintah `--loop` sekali per menit, bukan setiap lima detik. Lock mencegah proses monitor tumpang tindih dan pencatatan worker yang dilewati dibatasi agar log tetap ringkas. Binary `ping` perlu tersedia dan diizinkan pada server. Lokasi PHP CLI dan direktori project bergantung pada susunan server.
 
 Untuk memeriksa worker satu kali dari terminal, jalankan `php /path/project/api/live-monitor.php --once`. Snapshot terbaru ditulis ke `api/live-monitor.json`; selama pembaruan, endpoint juga dapat membaca snapshot lama dari `log/live-monitor.json`. Baris worker mulai dan selesai dapat dilihat di `log/cron-run.log`. Folder `api/` harus bisa ditulis oleh pengguna cron dan snapshot harus bisa dibaca oleh PHP-FPM.
 

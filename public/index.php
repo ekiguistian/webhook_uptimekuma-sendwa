@@ -123,6 +123,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     .config-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px 18px; margin-top: 18px; }
     .config-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #1e293b; color: #cbd5e1; font-size: 13px; }
     .config-value { color: #94a3b8; font-weight: 700; text-align: right; }
+    .resolver-list { display: grid; gap: 4px; margin-top: 10px; color: #94a3b8; font-size: 11px; }
+    .resolver-item { display: flex; justify-content: space-between; gap: 8px; }
+    .resolver-item.up { color: #86efac; }
+    .resolver-item.down { color: #fca5a5; }
     @media (max-width: 600px) {
       .box { padding: 20px; }
       .monitor { padding: 15px; }
@@ -148,9 +152,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       </div>
       <div class="monitor-grid">
         <article class="monitor-card">
-          <h3>DNS 1.1.1.1</h3>
+          <h3>Resolver DNS server</h3>
           <strong class="metric-value" id="metric-dns">—</strong>
           <span class="metric-state" id="state-dns">Menunggu worker</span>
+          <div class="resolver-list" id="dns-resolver-list" aria-live="polite"></div>
         </article>
         <article class="monitor-card">
           <h3>Koneksi NgirimWA</h3>
@@ -181,7 +186,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         <div class="config-item"><span>Group ID WhatsApp</span><span class="config-value" data-config="group_id">Memeriksa...</span></div>
         <div class="config-item"><span>URL Uptime Kuma</span><span class="config-value" data-config="uptime_kuma_url">Memeriksa...</span></div>
       </div>
-      <p class="note">Data diperbarui worker setiap 5 detik. DNS 1.1.1.1 diukur dengan kueri UDP, bukan ICMP. Latensi koneksi domain dipisahkan dari DNS; nilai API key, token, dan group ID tidak ditampilkan.</p>
+      <p class="note">Snapshot diperbarui worker setiap 5 detik. Resolver DNS diambil dari konfigurasi server dan diuji melalui kueri UDP. NgirimWA dan URL Uptime Kuma diuji dengan ICMP echo ping, maksimal sekali per menit. Nilai API key, token, dan group ID tidak ditampilkan.</p>
     </section>
 
     <form method="post" action="/" autocomplete="off">
@@ -252,7 +257,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       });
     }
 
-    function updateMonitorCheck(name, check) {
+    function updateMonitorCheck(name, check, checkedAt) {
       const value = document.getElementById(`metric-${name}`);
       const state = document.getElementById(`state-${name}`);
       if (!check || check.ok === null) {
@@ -264,13 +269,54 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
       if (check.ok === true) {
         value.textContent = Number.isFinite(Number(check.ms)) ? `${Number(check.ms).toFixed(2)} ms` : 'Terhubung';
-        state.textContent = 'Terhubung';
+        state.textContent = checkedAt ? `Ping ICMP · cek ${monitorAgeSeconds(checkedAt)} dtk lalu` : 'Terhubung';
         state.className = 'metric-state up';
       } else {
         value.textContent = '—';
-        state.textContent = check.configured === false ? 'Belum diatur' : 'Tidak terhubung';
+        state.textContent = check.configured === false ? 'Belum diatur' : (checkedAt ? `Ping ICMP gagal · cek ${monitorAgeSeconds(checkedAt)} dtk lalu` : 'Tidak terhubung');
         state.className = check.configured === false ? 'metric-state' : 'metric-state down';
       }
+    }
+
+    function monitorAgeSeconds(timestamp) {
+      const parsed = new Date(timestamp).getTime();
+      return Number.isFinite(parsed) ? Math.max(0, Math.floor((Date.now() - parsed) / 1000)) : 0;
+    }
+
+    function updateDnsMonitor(check) {
+      updateMonitorCheck('dns', check);
+      const list = document.getElementById('dns-resolver-list');
+      list.replaceChildren();
+      const resolvers = Array.isArray(check?.resolvers) ? check.resolvers : [];
+      if (resolvers.length === 0) {
+        const item = document.createElement('span');
+        item.textContent = check?.configured === false ? 'Resolver DNS tidak ditemukan' : 'Belum ada hasil probe';
+        list.appendChild(item);
+        const state = document.getElementById('state-dns');
+        if (check?.configured === false) {
+          state.textContent = 'Resolver tidak ditemukan';
+        } else if (check?.ok === false) {
+          state.textContent = 'Tidak ada resolver merespons';
+          state.className = 'metric-state down';
+        }
+        return;
+      }
+
+      resolvers.forEach(function (resolver) {
+        const row = document.createElement('div');
+        row.className = `resolver-item ${resolver.ok === true ? 'up' : 'down'}`;
+        const label = document.createElement('span');
+        label.textContent = resolver.label || 'Resolver';
+        const result = document.createElement('span');
+        result.textContent = resolver.ok === true && Number.isFinite(Number(resolver.ms))
+          ? `${Number(resolver.ms).toFixed(2)} ms`
+          : 'Tidak merespons';
+        row.append(label, result);
+        list.appendChild(row);
+      });
+      const state = document.getElementById('state-dns');
+      state.textContent = check.ok === true ? 'Resolver merespons' : 'Tidak ada resolver merespons';
+      state.className = check.ok === true ? 'metric-state up' : 'metric-state down';
     }
 
     async function refreshLiveMonitor() {
@@ -283,9 +329,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         if (!response.ok) throw new Error('Live monitor unavailable');
         const data = await response.json();
 
-        updateMonitorCheck('dns', data.checks && data.checks.dns);
-        updateMonitorCheck('ngirimwa', data.checks && data.checks.ngirimwa);
-        updateMonitorCheck('uptime-kuma', data.checks && data.checks.uptime_kuma);
+        updateDnsMonitor(data.checks && data.checks.dns);
+        updateMonitorCheck('ngirimwa', data.checks && data.checks.ngirimwa, data.domain_checked_at);
+        updateMonitorCheck('uptime-kuma', data.checks && data.checks.uptime_kuma, data.domain_checked_at);
 
         const counts = new Intl.NumberFormat('id-ID');
         document.getElementById('messages-success').textContent = counts.format(data.messages?.success ?? 0);
@@ -293,12 +339,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
         document.querySelectorAll('[data-config]').forEach(function (element) {
           const configured = Boolean(data.configuration && data.configuration[element.dataset.config]);
-          const defaultApiUrl = element.dataset.config === 'ngirimwa_api_url'
-            && Boolean(data.configuration && data.configuration.ngirimwa_api_url_default);
-          element.textContent = configured
-            ? 'Sudah diatur'
-            : (defaultApiUrl ? 'Belum diatur · default aktif' : 'Belum diatur');
-          element.className = configured || defaultApiUrl ? 'config-value ready' : 'config-value missing';
+          if (element.dataset.config === 'ngirimwa_api_url') {
+            element.textContent = configured ? 'OK' : 'Not set';
+            element.className = configured ? 'config-value ready' : 'config-value missing';
+            return;
+          }
+
+          element.textContent = configured ? 'Sudah diatur' : 'Belum diatur';
+          element.className = configured ? 'config-value ready' : 'config-value missing';
         });
 
         const updated = document.getElementById('monitor-updated');

@@ -13,12 +13,11 @@ if (PHP_SAPI !== 'cli') {
 $API_KEY = app_env('NGIRIMWA_API_KEY');
 $GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
 $API_BASE_URL = trim(app_env('NGIRIMWA_BASE_URL'));
-if ($API_BASE_URL === '') {
-    $API_BASE_URL = 'https://dash.ngirimwa.com/api/v1';
-}
+$API_BASE_URL_CONFIGURED = $API_BASE_URL !== '';
 $API_BASE_URL = rtrim($API_BASE_URL, '/');
-$DEVICE_STATUS_URL = $API_BASE_URL . '/devices/status';
-$SEND_URL = $API_BASE_URL . '/messages/send';
+$DEVICE_STATUS_URL = $API_BASE_URL_CONFIGURED ? $API_BASE_URL . '/devices/status' : '';
+$SEND_URL = $API_BASE_URL_CONFIGURED ? $API_BASE_URL . '/messages/send' : '';
+$WEBHOOK_TOKEN = app_env('UPTIME_WEBHOOK_TOKEN');
 
 $QUEUE_FILE = __DIR__ . '/queue.json';
 $STATUS_FILE = __DIR__ . '/last-status.json';
@@ -109,37 +108,94 @@ function curl_connection_timing_context($handle, $dnsLookupMs)
     ];
 }
 
-function drop_queue($reason, $context = [])
+function defer_queue($reason, $context = [])
 {
     global $QUEUE_FILE;
     $queueLock = app_queue_lock();
     if ($queueLock === false) {
-        log_send('system', 'Could not lock the queue while clearing failed messages');
+        log_send('system', 'Could not lock queue while recording deferred delivery');
+        return;
+    }
+
+    $queue = app_read_json_array($QUEUE_FILE);
+    if (!is_array($queue)) {
+        app_queue_unlock($queueLock);
+        log_send('system', 'Could not read queue while recording deferred delivery');
+        return;
+    }
+
+    $now = time();
+    $changed = false;
+    $expiredItems = [];
+    foreach ($queue as $service => &$item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        if (!is_numeric($item['deferred_since'] ?? null)) {
+            $item['deferred_since'] = $now;
+            $changed = true;
+        }
+        $item['deferred_reason'] = $reason;
+        $changed = true;
+        $deferredSeconds = max(0, $now - (int) $item['deferred_since']);
+        if ($deferredSeconds > 600) {
+            $expiredItems[] = [
+                'service' => (string) $service,
+                'status' => $item['status'] ?? null,
+                'deferred_seconds' => $deferredSeconds,
+                'reason' => $item['deferred_reason']
+            ];
+            unset($queue[$service]);
+        }
+    }
+    unset($item);
+
+    $saved = !$changed || app_write_json_array($QUEUE_FILE, $queue);
+    app_queue_unlock($queueLock);
+    if (!$saved) {
+        log_send('system', 'Could not save queue after recording deferred delivery');
+        return;
+    }
+
+    foreach ($expiredItems as $expiredItem) {
+        log_send('send-failure', 'Queued message expired after more than 10 minutes without delivery', $expiredItem);
+    }
+    if ($queue !== []) {
+        app_log_rate_limited('cron-run', 'Queue processing deferred; messages remain queued', 'queue-deferred-' . $reason, 60, [
+            'reason' => $reason,
+            'queued_count' => count($queue)
+        ] + $context);
+    }
+}
+
+function clear_queue_deferred($clearReasons)
+{
+    global $QUEUE_FILE;
+    $queueLock = app_queue_lock();
+    if ($queueLock === false) {
         return false;
     }
 
     $queue = app_read_json_array($QUEUE_FILE);
     if (!is_array($queue)) {
-        $queue = [];
-    }
-    foreach ($queue as $service => $item) {
-        $entryContext = [
-            'service' => (string) $service,
-            'reason' => $reason
-        ];
-        if (is_array($item) && isset($item['status'])) {
-            $entryContext['status'] = $item['status'];
-        }
-        log_send('send-failure', 'Queued message dropped without retry', $entryContext + $context);
-    }
-
-    $cleared = app_write_json_array($QUEUE_FILE, []);
-    app_queue_unlock($queueLock);
-    if (!$cleared) {
-        log_send('system', 'Could not clear the send queue after a failure');
+        app_queue_unlock($queueLock);
         return false;
     }
-    return true;
+
+    $changed = false;
+    foreach ($queue as &$item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        if (isset($item['deferred_since']) && in_array($item['deferred_reason'] ?? '', $clearReasons, true)) {
+            unset($item['deferred_since'], $item['deferred_reason']);
+            $changed = true;
+        }
+    }
+    unset($item);
+    $saved = !$changed || app_write_json_array($QUEUE_FILE, $queue);
+    app_queue_unlock($queueLock);
+    return $saved;
 }
 
 function remove_queue_item($service)
@@ -205,7 +261,10 @@ function complete_queue_item($service, $status)
         $lastStatus = [];
     }
 
-    $lastStatus[$service] = $status;
+    $lastStatus[$service] = [
+        'status' => $status,
+        'accepted_at' => time()
+    ];
     $statusSaved = app_write_json_array($STATUS_FILE, $lastStatus);
     unset($queue[$service]);
     $queueSaved = app_write_json_array($QUEUE_FILE, $queue);
@@ -230,10 +289,10 @@ if ($lock === false) {
 }
 if (!flock($lock, LOCK_EX | LOCK_NB)) {
     fclose($lock);
-    log_send('cron-run', 'Worker skipped: another execution is still active');
+    app_log_rate_limited('cron-run', 'Worker skipped: another execution is still active', 'send-queue-overlap', 60);
     exit;
 }
-log_send('cron-run', 'Worker started');
+app_log_rate_limited('cron-run', 'Worker started', 'send-queue-worker-started', 60);
 
 $queueLock = app_queue_lock();
 if ($queueLock === false) {
@@ -249,41 +308,56 @@ if (!is_array($queue)) {
     exit(1);
 }
 
-$removedOldFailures = false;
-foreach ($queue as $queuedService => $queuedItem) {
+$queueChanged = false;
+$now = time();
+foreach ($queue as $queuedService => &$queuedItem) {
     if (!is_array($queuedItem)) {
-        continue;
-    }
-    if (!empty($queuedItem['blocked_error']) || !empty($queuedItem['attempts']) || !empty($queuedItem['next_attempt_at'])) {
-        log_send('send-failure', 'Previously failed queue item dropped without retry', [
+        log_send('send-failure', 'Invalid queued message removed', [
             'service' => (string) $queuedService,
-            'error_code' => $queuedItem['blocked_error'] ?? null
+            'reason' => 'invalid_queue_item'
         ]);
         unset($queue[$queuedService]);
-        $removedOldFailures = true;
+        $queueChanged = true;
+        continue;
+    }
+
+    if (!is_numeric($queuedItem['queued_at'] ?? null)) {
+        // Give legacy queue entries a full ten-minute grace period from migration.
+        $queuedItem['queued_at'] = $now;
+        $queueChanged = true;
     }
 }
-if ($removedOldFailures && !app_write_json_array($QUEUE_FILE, $queue)) {
-    log_send('system', 'Could not remove previously failed items from the queue');
+unset($queuedItem);
+if ($queueChanged && !app_write_json_array($QUEUE_FILE, $queue)) {
+    app_queue_unlock($queueLock);
+    log_send('system', 'Could not save send queue after applying the 10-minute expiry');
+    exit(1);
 }
 app_queue_unlock($queueLock);
 if (empty($queue)) {
-    log_send('cron-run', 'Worker completed: no queued messages');
+    app_log_rate_limited('cron-run', 'Worker completed: no queued messages', 'send-queue-empty', 60);
     exit;
 }
 
-if ($API_KEY === '' || $GROUP_ID === '') {
-    log_send('send-failure', 'Send worker configuration is incomplete');
-    drop_queue('configuration_missing');
+if (!$API_BASE_URL_CONFIGURED || $API_KEY === '' || $GROUP_ID === '' || $WEBHOOK_TOKEN === '') {
+    $missing = [];
+    if (!$API_BASE_URL_CONFIGURED) $missing[] = 'NGIRIMWA_BASE_URL';
+    if ($API_KEY === '') $missing[] = 'NGIRIMWA_API_KEY';
+    if ($GROUP_ID === '') $missing[] = 'NGIRIMWA_GROUP_ID';
+    if ($WEBHOOK_TOKEN === '') $missing[] = 'UPTIME_WEBHOOK_TOKEN';
+    defer_queue('configuration_incomplete', [
+        'missing' => $missing,
+        'queued_count' => count($queue)
+    ]);
     exit(1);
 }
 
-$apiKeyFingerprint = hash('sha256', $API_KEY);
+$apiKeyFingerprint = hash('sha256', $API_KEY . "\0" . $API_BASE_URL);
 $authBlock = file_exists($AUTH_BLOCK_FILE)
     ? json_decode(file_get_contents($AUTH_BLOCK_FILE), true)
     : null;
 if (is_array($authBlock) && ($authBlock['api_key_hash'] ?? '') === $apiKeyFingerprint) {
-    drop_queue('authentication_blocked');
+    defer_queue('authentication_blocked', ['queued_count' => count($queue)]);
     exit(1);
 }
 if (file_exists($AUTH_BLOCK_FILE)) {
@@ -292,7 +366,8 @@ if (file_exists($AUTH_BLOCK_FILE)) {
 
 $apiResolution = resolve_api_curl_mapping($DEVICE_STATUS_URL);
 if ($apiResolution['error'] !== null) {
-    drop_queue('api_dns_resolution_failed', [
+    defer_queue('api_dns_resolution_failed', [
+        'queued_count' => count($queue),
         'api_host' => $apiResolution['host'],
         'dns_lookup_ms' => $apiResolution['dns_lookup_ms'],
         'dns_error' => $apiResolution['error']
@@ -309,8 +384,7 @@ $checkResult = null;
 $deviceStatus = null;
 $checkTimingContext = ['dns_lookup_ms' => $apiResolution['dns_lookup_ms']];
 
-// A short transport retry handles temporary connection errors without keeping
-// the queued message for a later cron run if the API/device remains unavailable.
+// Retry a transient transport failure once before deferring to the next cron run.
 for ($attempt = 1; $attempt <= 2; $attempt++) {
     $checkResponse = false;
     $checkHttpCode = 0;
@@ -377,12 +451,23 @@ if (!$deviceReady) {
         }
     }
 
-    drop_queue('api_or_device_unavailable', [
+    defer_queue('api_or_device_unavailable', [
+        'queued_count' => count($queue),
         'http_code' => $checkHttpCode,
         'device_status' => $deviceStatus,
         'error_code' => $errorCode,
         'curl_error' => $checkError
     ] + $checkTimingContext);
+    exit(1);
+}
+
+if (!clear_queue_deferred([
+    'configuration_incomplete',
+    'authentication_blocked',
+    'api_dns_resolution_failed',
+    'api_or_device_unavailable'
+])) {
+    log_send('system', 'Could not clear deferred state after API/device became ready');
     exit(1);
 }
 
@@ -435,8 +520,7 @@ if ($requestBody === false) {
 
 $send = curl_init($SEND_URL);
 if ($send === false) {
-    log_send('send-failure', 'Could not initialize NgirimWA send request', ['service' => (string) $service]);
-    remove_queue_item($service);
+    defer_queue('send_request_unavailable', ['service' => (string) $service]);
     exit(1);
 }
 $sendOptions = [
@@ -480,15 +564,18 @@ if (!$accepted) {
         if ($authBlockJson !== false) {
             file_put_contents($AUTH_BLOCK_FILE, $authBlockJson, LOCK_EX);
         }
-        drop_queue('authentication_failed', ['http_code' => $httpCode]);
+        defer_queue('authentication_failed', [
+            'queued_count' => count($queue),
+            'http_code' => $httpCode,
+            'error_code' => $errorCode
+        ]);
     } else {
-        log_send('send-failure', 'NgirimWA did not accept the message; it will not be retried', [
+        defer_queue('send_not_accepted', [
             'service' => (string) $service,
             'http_code' => $httpCode,
             'error_code' => $errorCode,
             'curl_error' => $error
         ] + $sendTimingContext);
-        remove_queue_item($service);
     }
     exit(1);
 }

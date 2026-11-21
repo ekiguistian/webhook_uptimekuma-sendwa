@@ -2,8 +2,6 @@
 
 require_once __DIR__ . '/config.php';
 
-$NGIRIMWA_API_KEY  = app_env('NGIRIMWA_API_KEY');
-$NGIRIMWA_GROUP_ID = app_env('NGIRIMWA_GROUP_ID');
 $MESSAGE_SIGNATURE = app_env('UPTIME_MESSAGE_SIGNATURE', 'Server Monitoring');
 $STATUS_WEBSITE    = app_env('UPTIME_STATUS_WEBSITE', 'https://status.example.com');
 
@@ -70,13 +68,6 @@ function log_msg($msg) {
     app_log('system', $msg);
 }
 
-if ($NGIRIMWA_API_KEY === '' || $NGIRIMWA_GROUP_ID === '') {
-    app_log('system', 'Webhook unavailable because required configuration is missing');
-    http_response_code(503);
-    echo json_encode(["ok"=>false, "message"=>"Service temporarily unavailable"]);
-    exit;
-}
-
 if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
     app_log('system', 'Webhook rejected: invalid JSON payload');
     http_response_code(400);
@@ -86,14 +77,26 @@ if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
 
 // Uptime Kuma test notifications can use a top-level message.
 $testMessage = $data['msg'] ?? null;
+$isTestNotification = false;
 if (is_string($testMessage) && stripos($testMessage, 'test') !== false) {
-
-    $monitorName = 'TEST-' . time();
-    $status      = 'UP';
+    try {
+        $testNumber = (string) random_int(1, 9);
+        for ($digitIndex = 1; $digitIndex < 10; $digitIndex++) {
+            $testNumber .= (string) random_int(0, 9);
+        }
+    } catch (Throwable $exception) {
+        app_log('system', 'Uptime Kuma test ID generation failed');
+        http_response_code(500);
+        echo json_encode(["ok"=>false, "message"=>"Request could not be processed"]);
+        exit;
+    }
+    $monitorName = 'TEST-' . $testNumber;
+    $status      = $testNumber;
     $target      = '-';
     $time        = date("Y-m-d H:i:s");
+    $isTestNotification = true;
 
-    log_msg("TEST MODE: $monitorName");
+    log_msg("TEST MODE: $monitorName ($status)");
 
 } else {
 
@@ -153,24 +156,48 @@ if (!is_array($lastStatus)) {
     $lastStatus = [];
 }
 
-// skip same
-if (($lastStatus[$monitorName] ?? null) === $status) {
-    log_msg("SKIP SAME: $monitorName");
-    app_queue_unlock($queueLock);
-    exit;
+// Suppress repeated states for ten minutes after the last accepted delivery.
+$lastEntry = $lastStatus[$monitorName] ?? null;
+$lastStatusValue = is_array($lastEntry) ? ($lastEntry['status'] ?? null) : $lastEntry;
+$lastAcceptedAt = is_array($lastEntry) && is_numeric($lastEntry['accepted_at'] ?? null)
+    ? (int) $lastEntry['accepted_at']
+    : 0;
+if ($lastStatusValue === $status) {
+    if ($lastAcceptedAt <= 0) {
+        // Migrate older status-only records and start their cooldown at deployment.
+        $lastAcceptedAt = time();
+        $lastStatus[$monitorName] = ['status' => $status, 'accepted_at' => $lastAcceptedAt];
+        if (!app_write_json_array($STATUS_FILE, $lastStatus)) {
+            app_log('system', 'Could not migrate legacy last-status entry', ['monitor' => $monitorName]);
+        }
+    }
+
+    $elapsed = max(0, time() - $lastAcceptedAt);
+    if (!$isTestNotification && $elapsed < 600) {
+        app_log_rate_limited('system', 'Duplicate monitor status suppressed during the 10-minute cooldown', 'same-status-' . $monitorName, 60, [
+            'monitor' => $monitorName,
+            'status' => $status,
+            'cooldown_seconds' => 600
+        ]);
+        app_queue_unlock($queueLock);
+        exit;
+    }
 }
 
 // skip queued
 if (isset($queue[$monitorName])) {
-    log_msg("SKIP QUEUED: $monitorName");
+    app_log_rate_limited('system', 'Monitor message skipped because an item is already queued', 'queued-status-' . $monitorName, 60, [
+        'monitor' => $monitorName,
+        'status' => $status
+    ]);
     app_queue_unlock($queueLock);
     exit;
 }
 
 // message
-$title = ($status === 'DOWN')
-    ? "🚨 *NOC ALERT - DOWN*"
-    : "✅ *NOC RECOVERY - UP*";
+$title = $isTestNotification
+    ? "🧪 *UPTIME KUMA TEST*"
+    : (($status === 'DOWN') ? "🚨 *NOC ALERT - DOWN*" : "✅ *NOC RECOVERY - UP*");
 
 $text  = "{$title}\n\n";
 $text .= "Service : {$monitorName}\n";
