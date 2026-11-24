@@ -1,4 +1,4 @@
-<?php
+<?php #ide cemerlang eki guistian
 
 require_once dirname(__DIR__) . '/api/config.php';
 
@@ -143,7 +143,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     <a class="webhook-url" id="webhook-url" href="#">Memuat URL...</a>
     <button class="copy" id="copy-webhook-url" type="button">Salin URL</button>
     <p class="message" id="url-copy-status" role="status" aria-live="polite"></p>
-    <p class="note">Agar URL ini dapat diakses, aktifkan URL rewrite. Apache: edit <code>public/.htaccess</code>. Nginx: tambahkan aturan di konfigurasi server domain. Petunjuk ada di README.</p>
+    <p class="note">Webhook untuk mengirim notifikasi otomatis Uptime kuma, dan mengirimkan ke whatsapp group menggunakan Wa Gateway ngirimwa.com.</p>
 
     <section class="monitor" aria-labelledby="monitor-title">
       <div class="monitor-heading">
@@ -191,7 +191,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         <div class="config-item"><span>Group ID WhatsApp</span><span class="config-value" data-config="group_id">Memeriksa...</span></div>
         <div class="config-item"><span>URL Uptime Kuma</span><span class="config-value" data-config="uptime_kuma_url">Memeriksa...</span></div>
       </div>
-      <p class="note">Snapshot diperbarui worker setiap 5 detik. Resolver DNS diambil dari konfigurasi server dan diuji melalui kueri UDP. NgirimWA dan URL Uptime Kuma diuji dengan ICMP echo ping, maksimal sekali per menit. Nilai API key, token, dan group ID tidak ditampilkan.</p>
+      <p class="note">Gunakan tombol generate token untuk mendapatkan token untuk pertama kali instalasi</p>
     </section>
 
     <form method="post" action="/" autocomplete="off">
@@ -209,6 +209,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       <button class="copy" id="copy-token" type="button">Salin Token</button>
       <p class="message" id="copy-status" role="status" aria-live="polite">Simpan token ini sebelum meninggalkan halaman.</p>
     <?php endif; ?>
+    <footer class="note">&copy; 2026 Eki Guistian.</footer>
   </main>
 
   <script>

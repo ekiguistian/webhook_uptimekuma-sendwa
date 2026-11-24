@@ -1,4 +1,4 @@
-<?php
+<?php #ide cemerlang eki guistian
 
 require_once __DIR__ . '/config.php';
 

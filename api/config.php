@@ -1,4 +1,4 @@
-<?php
+<?php #ide cemerlang eki guistian
 
 function load_env_file($path)
 {

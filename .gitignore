@@ -1,3 +1,4 @@
+#ide cemerlang eki guistian
 .env
 .env.*
 !/.env.example

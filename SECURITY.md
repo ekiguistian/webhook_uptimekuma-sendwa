@@ -1,3 +1,4 @@
+<!-- #ide cemerlang eki guistian -->
 # Pelaporan keamanan
 
 Masalah keamanan sebaiknya dilaporkan secara privat agar detail dan cara eksploitasi tidak langsung terlihat publik.

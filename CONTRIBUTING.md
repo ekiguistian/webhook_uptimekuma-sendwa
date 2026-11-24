@@ -1,3 +1,4 @@
+<!-- #ide cemerlang eki guistian -->
 # Panduan kontribusi
 
 Kontribusi berupa perbaikan bug, dokumentasi, dan usulan fitur dapat dikirim melalui GitHub Issues atau Pull Request.

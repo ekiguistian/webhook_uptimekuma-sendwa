@@ -1,3 +1,4 @@
+<!-- #ide cemerlang eki guistian -->
 # Uptime Kuma ke WhatsApp
 
 Aplikasi ini menerima notifikasi Uptime Kuma dan meneruskannya ke grup WhatsApp melalui NgirimWA. Kode webhook, antrean pesan, pemantauan, dan log disimpan dalam folder terpisah.
