@@ -208,6 +208,12 @@ Angka pada monitor halaman utama tersimpan di `log/delivery-metrics.json`. Folde
 
 Perbaikan dan usulan dapat dikirim melalui [GitHub Issues](https://github.com/ekiguistian/webhook_uptimekuma-sendwa/issues) atau [Pull Requests](https://github.com/ekiguistian/webhook_uptimekuma-sendwa/pulls). Lihat [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Dukungan
+## Dukungan anda berarti bagi saya untuk mengembangkan dan menemukan lebih banyak inspirasi.
 
-Jika project ini bermanfaat, dukungan segelas kopi tersedia melalui [PayPal](https://paypal.me/ekiguistian). Tautan ini juga ada di `.github/FUNDING.yml`.
+[Traktir Eki Segelas Kopi](https://app.midtrans.com/payment-links/b45ec2c9-80f7-4dd8-b2e9-e18d430d192e-7l5NTR4t)
+
+<a href="https://app.midtrans.com/payment-links/b45ec2c9-80f7-4dd8-b2e9-e18d430d192e-7l5NTR4t">
+  <img src="./G025119549_Payment_Link_b45ec2c9-80f7-4dd8-b2e9-e18d430d192e-7l5NTR4t.png" alt="QR Traktir Eki Segelas Kopi" width="320" />
+</a>
+
+Tautan ini juga ada di `.github/FUNDING.yml`.
